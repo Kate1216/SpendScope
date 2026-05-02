@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SpendScope | AI Monthly Bill Assistant</title>
+    <link rel="preconnect" href="https://cdn.jsdelivr.net" />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <section class="hero">
+        <div>
+          <p class="eyebrow">AI Monthly Bill Assistant</p>
+          <h1>SpendScope</h1>
+          <p class="hero-copy">
+            月底上传微信、支付宝或银行卡账单，一键生成清晰的消费统计和温和实用的月度总结。
+          </p>
+          <div class="feature-tags">
+            <span>支付宝 PDF 解析</span>
+            <span>微信 Excel 识别</span>
+            <span>退款自动抵扣</span>
+          </div>
+        </div>
+        <div class="upload-card">
+          <label class="upload-panel" for="billUploader">
+            <input id="billUploader" type="file" accept=".csv,.xlsx,.xls,.pdf" multiple />
+            <span class="upload-icon">+</span>
+            <strong>上传账单文件</strong>
+            <small>支持 CSV、XLSX、XLS、PDF，可一次上传多个平台账单</small>
+          </label>
+          <p class="upload-privacy">账单数据默认在浏览器本地处理，不上传服务器。</p>
+        </div>
+        <div id="uploadConfirm" class="upload-confirm hidden"></div>
+      </section>
+
+      <section class="flow-steps" aria-label="SpendScope 工作流程">
+        <span>上传账单</span>
+        <span>自动识别</span>
+        <span>分类统计</span>
+        <span>生成报告</span>
+        <span>导出保存</span>
+      </section>
+
+      <section class="status-bar" id="statusBar">
+        <span>等待上传账单文件</span>
+        <div class="status-actions">
+          <label class="month-filter">
+            <span>分析月份</span>
+            <select id="monthFilter" disabled>
+              <option value="">暂无数据</option>
+            </select>
+          </label>
+          <button id="saveLocal" class="action-button primary-action" type="button" disabled>保存到本地</button>
+          <button id="clearStorage" class="action-button" type="button" disabled>删除当前报告</button>
+          <button id="exportExcel" class="action-button" type="button" disabled>导出 Excel</button>
+          <button id="exportPdf" class="action-button" type="button" disabled>导出 PDF</button>
+        </div>
+      </section>
+
+      <p class="privacy-note">当前报告数据仅在你点击保存后存入浏览器本地，刷新页面后可自动恢复；如需删除，请点击删除当前报告。</p>
+
+      <section class="metrics-grid">
+        <article class="metric-card income">
+          <span><b>↗</b> 本月总收入</span>
+          <strong id="totalIncome">¥0.00</strong>
+        </article>
+        <article class="metric-card expense">
+          <span><b>↘</b> 本月总支出</span>
+          <strong id="totalExpense">¥0.00</strong>
+        </article>
+        <article class="metric-card net">
+          <span><b>≈</b> 净收入 / 净支出</span>
+          <strong id="netAmount">¥0.00</strong>
+        </article>
+        <article class="metric-card count">
+          <span><b>#</b> 消费笔数</span>
+          <strong id="expenseCount">0</strong>
+        </article>
+      </section>
+
+      <section class="dashboard-grid">
+        <article class="panel chart-panel">
+          <div class="panel-heading">
+            <h2>分类支出</h2>
+            <span>钱主要花在哪</span>
+          </div>
+          <canvas id="categoryChart"></canvas>
+        </article>
+
+        <article class="panel chart-panel">
+          <div class="panel-heading">
+            <h2>平台支出</h2>
+            <span>微信 / 支付宝 / 银行</span>
+          </div>
+          <canvas id="platformChart"></canvas>
+        </article>
+
+        <article class="panel chart-panel wide">
+          <div class="panel-heading">
+            <h2>每日趋势</h2>
+            <span>本月每天消费变化</span>
+          </div>
+          <canvas id="dailyChart"></canvas>
+        </article>
+
+        <article class="panel ai-panel">
+          <div class="panel-heading">
+            <h2>AI 消费洞察</h2>
+            <span class="insight-badge">AI Insight</span>
+          </div>
+          <div id="aiSummary" class="summary-text">
+            上传账单后，这里会生成本月总体情况、主要支出类别、值得注意的消费和下月建议。
+          </div>
+        </article>
+      </section>
+
+      <section class="panel table-panel">
+        <div class="panel-heading">
+          <h2>账单明细</h2>
+          <span id="tableHint">展示前 100 条整理后的交易</span>
+        </div>
+        <div class="table-tools">
+          <input id="tableSearch" class="table-search" type="search" placeholder="搜索交易对象、交易类型、商品说明、类别或金额" />
+          <button id="manageCategories" class="action-button" type="button">管理分类</button>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>时间</th>
+                <th><button class="th-filter" type="button" data-filter="platform">平台 ▾</button></th>
+                <th><button class="th-filter" type="button" data-filter="merchant">交易对象 ▾</button></th>
+                <th><button class="th-filter" type="button" data-filter="transactionType">交易类型 ▾</button></th>
+                <th><button class="th-filter" type="button" data-filter="category">类别 ▾</button></th>
+                <th><button class="th-filter" type="button" data-filter="type">收支类型 ▾</button></th>
+                <th>金额</th>
+              </tr>
+            </thead>
+            <tbody id="transactionTable">
+              <tr>
+                <td colspan="7" class="empty-row">还没有账单数据，上传账单后将在这里显示整理后的明细。</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div id="headerFilterMenu" class="header-filter-menu hidden">
+          <div id="headerFilterOptions" class="header-filter-options"></div>
+        </div>
+      </section>
+    </main>
+
+    <div id="categoryModal" class="modal-backdrop hidden">
+      <div class="modal">
+        <div class="modal-heading">
+          <h2>管理自定义分类</h2>
+          <button id="closeCategoryModal" class="icon-button" type="button">×</button>
+        </div>
+        <label class="modal-field">
+          <span>选择类别类型</span>
+          <select id="customCategoryType">
+            <option value="expense">支出分类</option>
+            <option value="income">收入分类</option>
+          </select>
+        </label>
+        <label class="modal-field">
+          <span>输入新的分类名称</span>
+          <input id="customCategoryName" type="text" placeholder="例如：手工材料" />
+        </label>
+        <p id="categoryMessage" class="modal-message"></p>
+        <div class="modal-actions">
+          <button id="addCategory" class="action-button primary-action" type="button">添加分类</button>
+          <button id="cancelCategoryModal" class="action-button" type="button">关闭</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="loadingOverlay" class="loading-overlay hidden" aria-live="polite" aria-busy="true">
+      <div class="loading-card">
+        <span class="loading-spinner" aria-hidden="true"></span>
+        <strong>正在解析账单，请稍候…</strong>
+        <small>SpendScope 正在整理交易明细和消费分类</small>
+      </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/html2pdf.js@0.10.1/dist/html2pdf.bundle.min.js"></script>
+    <script src="./script.js"></script>
+  </body>
+</html>
