@@ -1,4 +1,4 @@
-<!doctype html>
+﻿<!doctype html>
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
@@ -7,8 +7,15 @@
     <link rel="preconnect" href="https://cdn.jsdelivr.net" />
     <link rel="stylesheet" href="./styles.css" />
   </head>
-  <body>
+  <body class="app-initializing">
     <main class="app-shell">
+      <nav class="page-tabs">
+        <button class="page-tab active" type="button" data-page="overview">本月总览</button>
+        <button class="page-tab" type="button" data-page="details">账单明细</button>
+        <button class="page-tab" type="button" data-page="trends">趋势分析</button>
+      </nav>
+
+      <section id="overviewPage" class="app-page active">
       <section class="hero">
         <div>
           <p class="eyebrow">AI Monthly Bill Assistant</p>
@@ -80,6 +87,60 @@
         </article>
       </section>
 
+      <section class="panel budget-panel">
+        <div class="panel-heading">
+          <h2>本月预算提醒</h2>
+          <span id="budgetMonthLabel">当前月份</span>
+        </div>
+        <div class="budget-layout">
+          <div class="budget-form">
+            <label class="budget-input-row">
+              <span>支出预算</span>
+              <input id="monthlyBudgetInput" type="number" min="0" step="0.01" placeholder="例如 3000" />
+            </label>
+            <div class="budget-actions">
+              <button id="saveBudget" class="action-button primary-action" type="button">保存预算</button>
+              <button id="clearBudget" class="action-button" type="button">清除预算</button>
+            </div>
+          </div>
+          <div class="budget-summary">
+            <div>
+              <span>预算金额</span>
+              <strong id="budgetAmount">未设置</strong>
+            </div>
+            <div>
+              <span>已用支出</span>
+              <strong id="budgetUsed">¥0.00</strong>
+            </div>
+            <div>
+              <span>剩余预算</span>
+              <strong id="budgetRemaining">未设置</strong>
+            </div>
+          </div>
+        </div>
+        <div class="budget-progress-track">
+          <div id="budgetProgress" class="budget-progress-bar empty"></div>
+        </div>
+        <p id="budgetStatus" class="budget-status empty">未设置预算，保存后会显示本月使用进度。</p>
+      </section>
+
+      </section>
+
+      <section id="trendsPage" class="app-page">
+      <section class="panel monthly-bills-panel">
+        <div class="panel-heading">
+          <div>
+            <h2>月度账单</h2>
+            <span>保存后的月份可用于后续趋势分析。</span>
+          </div>
+        </div>
+        <div class="monthly-bills-upload">
+          <input id="monthlyBillsUploader" type="file" accept=".csv,.xlsx,.xls,.pdf" multiple />
+          <button id="chooseMonthlyBillFile" class="action-button primary-action" type="button">上传账单文件</button>
+          <button id="saveToMonthlyBills" class="action-button" type="button">保存为月度账单</button>
+        </div>
+        <div id="monthlyBillsList" class="monthly-bills-list"></div>
+      </section>
       <section class="dashboard-grid">
         <article class="panel chart-panel">
           <div class="panel-heading">
@@ -116,10 +177,13 @@
         </article>
       </section>
 
+      </section>
+
+      <section id="detailsPage" class="app-page">
       <section class="panel table-panel">
         <div class="panel-heading">
           <h2>账单明细</h2>
-          <span id="tableHint">展示前 100 条整理后的交易</span>
+          <span id="tableHint">共 0 条明细，当前显示第 0 / 0 页</span>
         </div>
         <div class="table-tools">
           <input id="tableSearch" class="table-search" type="search" placeholder="搜索交易对象、交易类型、商品说明、类别或金额" />
@@ -145,9 +209,62 @@
             </tbody>
           </table>
         </div>
+        <div id="tablePagination" class="table-pagination"></div>
         <div id="headerFilterMenu" class="header-filter-menu hidden">
           <div id="headerFilterOptions" class="header-filter-options"></div>
         </div>
+      </section>
+      </section>
+
+      <section id="comparePage" class="app-page">
+        <section class="compare-hero">
+          <div>
+            <p class="eyebrow">Month Comparison</p>
+            <h2>多月对比</h2>
+            <p id="compareStatus" class="compare-status">请选择一个具体月份查看环比变化。</p>
+          </div>
+        </section>
+
+        <section class="compare-metrics-grid">
+          <article class="compare-card">
+            <span>当前月份总支出</span>
+            <strong id="currentMonthExpense">¥0.00</strong>
+          </article>
+          <article class="compare-card">
+            <span>上一月份总支出</span>
+            <strong id="previousMonthExpense">¥0.00</strong>
+          </article>
+          <article class="compare-card">
+            <span>环比变化金额</span>
+            <strong id="monthExpenseDelta">¥0.00</strong>
+          </article>
+          <article class="compare-card">
+            <span>环比变化比例</span>
+            <strong id="monthExpenseRate">0%</strong>
+          </article>
+        </section>
+
+        <section class="compare-lists-grid">
+          <article class="panel compare-list">
+            <div class="panel-heading">
+              <h2>支出增加最多 TOP 3</h2>
+            </div>
+            <div id="increaseCategoryList"></div>
+          </article>
+          <article class="panel compare-list">
+            <div class="panel-heading">
+              <h2>支出减少最多 TOP 3</h2>
+            </div>
+            <div id="decreaseCategoryList"></div>
+          </article>
+        </section>
+
+        <section class="panel compare-ai-panel">
+          <div class="panel-heading">
+            <h2>对比洞察</h2>
+          </div>
+          <p id="compareSummary" class="summary-text">选择单个月份后，SpendScope 会生成和上月的消费变化总结。</p>
+        </section>
       </section>
     </main>
 
@@ -191,3 +308,4 @@
     <script src="./script.js"></script>
   </body>
 </html>
+

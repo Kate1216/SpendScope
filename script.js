@@ -45,15 +45,27 @@ const money = new Intl.NumberFormat("zh-CN", { style: "currency", currency: "CNY
 const charts = {};
 const STORAGE_KEY = "spendscope.transactions.v1";
 const CUSTOM_CATEGORY_KEY = "spendscope_custom_categories";
+const BUDGET_STORAGE_KEY = "spendscope.monthlyBudgets.v1";
+const MONTHLY_BILLS_KEY = "spendscope.monthlyBills.v1";
+const ACTIVE_PAGE_KEY = "spendscope.activePage.v1";
+const VALID_PAGES = ["overview", "details", "trends"];
+const PAGE_SIZE = 20;
 let allTransactions = [];
 let isSaved = false;
 let hasUnsavedChanges = false;
 let customCategories = { expense: [], income: [] };
+let monthlyBudgets = {};
+let monthlyBills = {};
 let currentTableTransactions = [];
+let currentTablePage = 1;
 
 const billUploader = document.getElementById("billUploader");
+const monthlyBillsUploader = document.getElementById("monthlyBillsUploader");
 const uploadPanel = document.querySelector(".upload-panel");
 const chooseBillFileButton = document.getElementById("chooseBillFile");
+const chooseMonthlyBillFileButton = document.getElementById("chooseMonthlyBillFile");
+const saveToMonthlyBillsButton = document.getElementById("saveToMonthlyBills");
+const monthlyBillsList = document.getElementById("monthlyBillsList");
 const uploadConfirm = document.getElementById("uploadConfirm");
 const saveLocalButton = document.getElementById("saveLocal");
 const clearStorageButton = document.getElementById("clearStorage");
@@ -61,6 +73,7 @@ const exportExcelButton = document.getElementById("exportExcel");
 const exportPdfButton = document.getElementById("exportPdf");
 const transactionTable = document.getElementById("transactionTable");
 const tableSearch = document.getElementById("tableSearch");
+const tablePagination = document.getElementById("tablePagination");
 const headerFilterMenu = document.getElementById("headerFilterMenu");
 const headerFilterOptions = document.getElementById("headerFilterOptions");
 const headerFilterButtons = Array.from(document.querySelectorAll(".th-filter"));
@@ -73,7 +86,30 @@ const customCategoryType = document.getElementById("customCategoryType");
 const customCategoryName = document.getElementById("customCategoryName");
 const categoryMessage = document.getElementById("categoryMessage");
 const loadingOverlay = document.getElementById("loadingOverlay");
+const monthlyBudgetInput = document.getElementById("monthlyBudgetInput");
+const saveBudgetButton = document.getElementById("saveBudget");
+const clearBudgetButton = document.getElementById("clearBudget");
+const budgetMonthLabel = document.getElementById("budgetMonthLabel");
+const budgetAmount = document.getElementById("budgetAmount");
+const budgetUsed = document.getElementById("budgetUsed");
+const budgetRemaining = document.getElementById("budgetRemaining");
+const budgetProgress = document.getElementById("budgetProgress");
+const budgetStatus = document.getElementById("budgetStatus");
+const pageTabs = Array.from(document.querySelectorAll(".page-tab"));
+const overviewPage = document.getElementById("overviewPage");
+const detailsPage = document.getElementById("detailsPage");
+const trendsPage = document.getElementById("trendsPage");
+const comparePage = document.getElementById("comparePage");
+const compareStatus = document.getElementById("compareStatus");
+const currentMonthExpense = document.getElementById("currentMonthExpense");
+const previousMonthExpense = document.getElementById("previousMonthExpense");
+const monthExpenseDelta = document.getElementById("monthExpenseDelta");
+const monthExpenseRate = document.getElementById("monthExpenseRate");
+const increaseCategoryList = document.getElementById("increaseCategoryList");
+const decreaseCategoryList = document.getElementById("decreaseCategoryList");
+const compareSummary = document.getElementById("compareSummary");
 let pendingFiles = [];
+let activePage = "overview";
 let activeHeaderFilter = "";
 const tableFilters = {
   platform: "",
@@ -91,9 +127,15 @@ let tableFilterOptions = {
 };
 
 document.addEventListener("DOMContentLoaded", () => {
+  loadMonthlyBudgets();
+  loadMonthlyBills();
   loadCustomCategories();
   restoreDashboardFromStorage();
   updateFilterOptions();
+  renderBudgetPanel();
+  renderMonthlyBills();
+  const savedPage = localStorage.getItem(ACTIVE_PAGE_KEY);
+  switchPage(VALID_PAGES.includes(savedPage) ? savedPage : "overview");
 });
 
 window.addEventListener("beforeunload", handleBeforeUnload);
@@ -107,6 +149,7 @@ exportExcelButton.addEventListener("click", exportTransactionsToExcel);
 exportPdfButton.addEventListener("click", exportReportToPdf);
 transactionTable.addEventListener("change", handleTransactionEdit);
 tableSearch.addEventListener("input", handleSearchInput);
+tablePagination?.addEventListener("click", handleTablePaginationClick);
 headerFilterButtons.forEach((button) => {
   button.addEventListener("click", (event) => openHeaderFilter(event.currentTarget));
 });
@@ -116,6 +159,14 @@ manageCategoriesButton.addEventListener("click", openCategoryModal);
 closeCategoryModalButton.addEventListener("click", closeCategoryModal);
 cancelCategoryModalButton.addEventListener("click", closeCategoryModal);
 addCategoryButton.addEventListener("click", addCustomCategory);
+saveBudgetButton?.addEventListener("click", saveCurrentMonthBudget);
+clearBudgetButton?.addEventListener("click", clearCurrentMonthBudget);
+monthlyBudgetInput?.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") saveCurrentMonthBudget();
+});
+pageTabs.forEach((tab) => {
+  tab.addEventListener("click", () => switchPage(tab.dataset.page));
+});
 updateActionButtons();
 
 billUploader.addEventListener("change", (event) => {
@@ -127,9 +178,38 @@ billUploader.addEventListener("change", (event) => {
   }
 });
 
+monthlyBillsUploader?.addEventListener("change", async (event) => {
+  const files = Array.from(event.target.files || []);
+  if (!files.length) return;
+  setLoading(true);
+  try {
+    await processFiles(files);
+  } finally {
+    setLoading(false);
+    monthlyBillsUploader.value = "";
+  }
+});
+
 chooseBillFileButton?.addEventListener("click", (event) => {
   event.stopPropagation();
   billUploader.click();
+});
+
+chooseMonthlyBillFileButton?.addEventListener("click", () => {
+  monthlyBillsUploader?.click();
+});
+
+saveToMonthlyBillsButton?.addEventListener("click", saveCurrentReportToMonthlyBills);
+monthlyBillsList?.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-month-action]");
+  if (!button) return;
+  const month = button.dataset.month;
+  if (!month) return;
+  if (button.dataset.monthAction === "load") {
+    loadMonthlyBill(month);
+  } else if (button.dataset.monthAction === "delete") {
+    deleteMonthlyBill(month);
+  }
 });
 
 uploadPanel.addEventListener("click", (event) => {
@@ -170,8 +250,24 @@ function handleSelectedFiles(files) {
   uploadConfirm.innerHTML = `
     <p>已选择 ${count} 个文件，是否开始上传并生成月度账单报告？</p>
     <div class="upload-actions">
+      <button class="primary" type="button" id="confirmUpload">开始分析</button>
+      <button class="secondary" type="button" id="cancelUpload">取消</button>
+    </div>
+  `;
+  uploadConfirm.classList.remove("hidden");
+  console.log("[Mobile Upload] uploadConfirm visible");
+  setStatus("已选择文件，等待确认上传。");
+  document.getElementById("confirmUpload").addEventListener("click", confirmUploadFiles);
+  document.getElementById("cancelUpload").addEventListener("click", cancelUploadFiles);
+  return;
+  /*
+  uploadConfirm.innerHTML = `
+    <p>已选择 ${count} 个文件，是否开始上传并生成月度账单报告？</p>
+    <div class="upload-actions">
       <button class="primary" type="button" id="confirmUpload">确认上传</button>
       <button class="secondary" type="button" id="cancelUpload">取消</button>
+      ${renderPdfMetric("本月预算", report.budget ? money.format(report.budget) : "未设置")}
+      ${renderPdfMetric("预算状态", report.budgetStatus?.pdfText || "未设置")}
     </div>
   `;
   uploadConfirm.classList.remove("hidden");
@@ -188,6 +284,7 @@ function handleSelectedFiles(files) {
   setStatus("已选择文件，等待确认上传。");
   document.getElementById("confirmUpload").addEventListener("click", confirmUploadFiles);
   document.getElementById("cancelUpload").addEventListener("click", cancelUploadFiles);
+  */
 }
 
 async function confirmUploadFiles() {
@@ -201,12 +298,14 @@ async function confirmUploadFiles() {
   } finally {
     setLoading(false);
     billUploader.value = "";
+    if (monthlyBillsUploader) monthlyBillsUploader.value = "";
   }
 }
 
 function cancelUploadFiles() {
   pendingFiles = [];
   billUploader.value = "";
+  if (monthlyBillsUploader) monthlyBillsUploader.value = "";
   uploadConfirm.classList.add("hidden");
   uploadConfirm.innerHTML = "";
   setStatus("等待上传账单文件");
@@ -214,6 +313,7 @@ function cancelUploadFiles() {
 
 async function processFiles(files) {
   if (!files.length) return;
+  currentTablePage = 1;
   setStatus(`正在解析 ${files.length} 个文件...`);
   try {
     const rows = (await Promise.all(files.map(readBillFile))).flat();
@@ -224,6 +324,7 @@ async function processFiles(files) {
       return;
     }
     allTransactions = transactions;
+    currentTablePage = 1;
     populateMonthFilter(transactions);
     const selectedMonth = document.getElementById("monthFilter").value;
     renderSelectedMonth(selectedMonth);
@@ -290,6 +391,316 @@ function saveCustomCategories() {
   localStorage.setItem(CUSTOM_CATEGORY_KEY, JSON.stringify(customCategories));
 }
 
+function loadMonthlyBudgets() {
+  const raw = localStorage.getItem(BUDGET_STORAGE_KEY);
+  if (!raw) return;
+
+  try {
+    const parsed = JSON.parse(raw);
+    monthlyBudgets = Object.fromEntries(
+      Object.entries(parsed || {})
+        .map(([month, value]) => [month, Number(value)])
+        .filter(([, value]) => Number.isFinite(value) && value > 0)
+    );
+  } catch (error) {
+    console.warn("[SpendScope Budget] Failed to load monthly budgets:", error);
+    monthlyBudgets = {};
+    localStorage.removeItem(BUDGET_STORAGE_KEY);
+  }
+}
+
+function saveMonthlyBudgets() {
+  localStorage.setItem(BUDGET_STORAGE_KEY, JSON.stringify(monthlyBudgets));
+}
+
+function loadMonthlyBills() {
+  const raw = localStorage.getItem(MONTHLY_BILLS_KEY);
+  if (!raw) return;
+
+  try {
+    const parsed = JSON.parse(raw);
+    monthlyBills = Object.fromEntries(
+      Object.entries(parsed || {})
+        .filter(([month, bill]) => /^\d{4}-\d{2}$/.test(month) && Array.isArray(bill?.transactions))
+        .map(([month, bill]) => [
+          month,
+          {
+            month,
+            savedAt: bill.savedAt || "",
+            transactions: bill.transactions,
+          },
+        ])
+    );
+  } catch (error) {
+    console.warn("[SpendScope Monthly Bills] Failed to load monthly bills:", error);
+    monthlyBills = {};
+    localStorage.removeItem(MONTHLY_BILLS_KEY);
+  }
+}
+
+function saveMonthlyBills() {
+  localStorage.setItem(MONTHLY_BILLS_KEY, JSON.stringify(monthlyBills));
+}
+
+function groupTransactionsByMonth(transactions) {
+  return transactions.reduce((groups, item) => {
+    const month = monthKey(item.date);
+    if (!groups[month]) groups[month] = [];
+    groups[month].push(item);
+    return groups;
+  }, {});
+}
+
+function serializeTransactions(transactions) {
+  return transactions.map((item) => ({
+    ...item,
+    date: item.date instanceof Date ? item.date.toISOString() : item.date,
+  }));
+}
+
+function deserializeTransactions(transactions) {
+  return ensureTransactionIds(
+    transactions
+      .map((item) => migrateStoredTransaction({ ...item, date: new Date(item.date) }))
+      .filter((item) => item.date instanceof Date && !Number.isNaN(item.date.getTime()))
+  );
+}
+
+function saveCurrentReportToMonthlyBills() {
+  if (!allTransactions.length) {
+    setStatus("请先上传账单，再保存为月度账单。");
+    return;
+  }
+
+  const grouped = groupTransactionsByMonth(allTransactions);
+  const savedAt = new Date().toISOString();
+  let savedCount = 0;
+
+  Object.entries(grouped).forEach(([month, transactions]) => {
+    if (monthlyBills[month] && !confirm(`${month} 的月度账单已存在，是否覆盖？`)) {
+      return;
+    }
+    monthlyBills[month] = {
+      month,
+      savedAt,
+      transactions: serializeTransactions(transactions),
+    };
+    savedCount += 1;
+  });
+
+  if (!savedCount) {
+    setStatus("没有保存新的月度账单。");
+    return;
+  }
+
+  saveMonthlyBills();
+  renderMonthlyBills();
+  setStatus(`已保存 ${savedCount} 个月度账单。`);
+}
+
+function renderMonthlyBills() {
+  if (!monthlyBillsList) return;
+  const bills = Object.values(monthlyBills).sort((a, b) => b.month.localeCompare(a.month));
+  if (!bills.length) {
+    monthlyBillsList.innerHTML = '<p class="monthly-bills-empty">还没有保存的月度账单。</p>';
+    return;
+  }
+
+  monthlyBillsList.innerHTML = bills
+    .map((bill) => {
+      const savedDate = bill.savedAt ? new Date(bill.savedAt) : null;
+      const savedAt = savedDate && !Number.isNaN(savedDate.getTime()) ? formatDateTime(savedDate) : "未知时间";
+      return `
+        <article class="monthly-bill-item">
+          <div>
+            <strong>${escapeHtml(bill.month)}</strong>
+            <span>${bill.transactions.length} 笔交易 · 保存于 ${escapeHtml(savedAt)}</span>
+          </div>
+          <div class="monthly-bill-actions">
+            <button class="action-button" type="button" data-month-action="load" data-month="${escapeHtml(bill.month)}">加载</button>
+            <button class="action-button" type="button" data-month-action="delete" data-month="${escapeHtml(bill.month)}">删除</button>
+          </div>
+        </article>
+      `;
+    })
+    .join("");
+}
+
+function loadMonthlyBill(month) {
+  const bill = monthlyBills[month];
+  if (!bill) {
+    setStatus("没有找到该月份的月度账单。");
+    renderMonthlyBills();
+    return;
+  }
+
+  const transactions = deserializeTransactions(bill.transactions);
+  if (!transactions.length) {
+    setStatus(`${month} 的月度账单数据无法加载。`);
+    return;
+  }
+
+  allTransactions = transactions;
+  currentTablePage = 1;
+  populateMonthFilter(allTransactions);
+  const monthFilter = document.getElementById("monthFilter");
+  monthFilter.value = month;
+  renderSelectedMonth(month);
+  renderBudgetPanel();
+  markSaved(`已加载 ${month} 月度账单。`);
+}
+
+function deleteMonthlyBill(month) {
+  if (!monthlyBills[month]) return;
+  if (!confirm(`确定删除 ${month} 的月度账单吗？`)) return;
+  delete monthlyBills[month];
+  saveMonthlyBills();
+  renderMonthlyBills();
+  setStatus(`已删除 ${month} 月度账单。`);
+}
+
+function switchPage(page) {
+  activePage = VALID_PAGES.includes(page) ? page : "overview";
+  pageTabs.forEach((tab) => tab.classList.toggle("active", tab.dataset.page === activePage));
+  overviewPage?.classList.toggle("active", activePage === "overview");
+  detailsPage?.classList.toggle("active", activePage === "details");
+  trendsPage?.classList.toggle("active", activePage === "trends");
+  comparePage?.classList.remove("active");
+  localStorage.setItem(ACTIVE_PAGE_KEY, activePage);
+  if (activePage === "details") {
+    applyTableFilters();
+  }
+  if (activePage === "trends") {
+    requestAnimationFrame(() => {
+      Object.values(charts).forEach((chart) => {
+        chart?.resize?.();
+        chart?.update?.();
+      });
+    });
+  }
+}
+
+function getPreviousMonthKey(month) {
+  const match = /^(\d{4})-(\d{2})$/.exec(month || "");
+  if (!match) return "";
+  const date = new Date(Number(match[1]), Number(match[2]) - 2, 1);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
+}
+
+function getTransactionsByMonth(month) {
+  if (!month) return [];
+  return allTransactions.filter((item) => monthKey(item.date) === month);
+}
+
+function getMonthExpenseSummary(month) {
+  const transactions = getTransactionsByMonth(month);
+  const expenses = transactions.filter((item) => item.type === TYPE_OPTIONS[0]);
+  const refunds = transactions.filter((item) => item.type === TYPE_OPTIONS[2]);
+  const totalRefund = sum(refunds);
+  const totalExpense = Math.max(0, sum(expenses) - totalRefund);
+  return {
+    month,
+    transactions,
+    expenses,
+    refunds,
+    totalExpense,
+    category: aggregateNet(expenses, refunds, "category"),
+  };
+}
+
+function getCategoryDeltas(currentCategory, previousCategory) {
+  const previousMap = new Map(previousCategory.map((item) => [item.name, item.value]));
+  const names = new Set([...currentCategory.map((item) => item.name), ...previousCategory.map((item) => item.name)]);
+  return Array.from(names)
+    .map((name) => {
+      const current = currentCategory.find((item) => item.name === name)?.value || 0;
+      const previous = previousMap.get(name) || 0;
+      return { name, current, previous, delta: current - previous };
+    })
+    .filter((item) => item.delta !== 0)
+    .sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta));
+}
+
+function renderMonthComparison() {
+  const currentMonth = document.getElementById("monthFilter").value;
+  if (!currentMonth) {
+    setCompareEmpty("请选择一个具体月份查看多月对比。");
+    return;
+  }
+
+  const previousMonth = getPreviousMonthKey(currentMonth);
+  const current = getMonthExpenseSummary(currentMonth);
+  const previous = getMonthExpenseSummary(previousMonth);
+  if (!previous.transactions.length) {
+    setCompareEmpty("暂无上月数据，上传更多月份账单后可生成对比。");
+    return;
+  }
+
+  const delta = current.totalExpense - previous.totalExpense;
+  const rate = previous.totalExpense ? delta / previous.totalExpense : 0;
+  const deltas = getCategoryDeltas(current.category, previous.category);
+  const increased = deltas.filter((item) => item.delta > 0).sort((a, b) => b.delta - a.delta).slice(0, 3);
+  const decreased = deltas.filter((item) => item.delta < 0).sort((a, b) => a.delta - b.delta).slice(0, 3);
+
+  compareStatus.textContent = `${currentMonth} 对比 ${previousMonth}`;
+  currentMonthExpense.textContent = money.format(current.totalExpense);
+  previousMonthExpense.textContent = money.format(previous.totalExpense);
+  monthExpenseDelta.textContent = formatSignedMoney(delta);
+  monthExpenseDelta.className = delta > 0 ? "up" : delta < 0 ? "down" : "neutral";
+  monthExpenseRate.textContent = formatSignedPercent(rate);
+  monthExpenseRate.className = delta > 0 ? "up" : delta < 0 ? "down" : "neutral";
+  increaseCategoryList.innerHTML = renderCategoryDeltaList(increased);
+  decreaseCategoryList.innerHTML = renderCategoryDeltaList(decreased);
+  compareSummary.textContent = generateComparisonSummary(currentMonth, previousMonth, current, previous, delta, rate, increased, decreased);
+}
+
+function setCompareEmpty(message) {
+  compareStatus.textContent = message;
+  currentMonthExpense.textContent = money.format(0);
+  previousMonthExpense.textContent = money.format(0);
+  monthExpenseDelta.textContent = formatSignedMoney(0);
+  monthExpenseRate.textContent = formatSignedPercent(0);
+  monthExpenseDelta.className = "neutral";
+  monthExpenseRate.className = "neutral";
+  increaseCategoryList.innerHTML = renderCategoryDeltaList([]);
+  decreaseCategoryList.innerHTML = renderCategoryDeltaList([]);
+  compareSummary.textContent = message;
+}
+
+function renderCategoryDeltaList(items) {
+  if (!items.length) return '<p class="compare-empty">暂无明显变化</p>';
+  return items
+    .map(
+      (item) => `
+        <div class="compare-list-item">
+          <span>${escapeHtml(item.name)}</span>
+          <strong class="${item.delta > 0 ? "up" : "down"}">${formatSignedMoney(item.delta)}</strong>
+        </div>
+      `
+    )
+    .join("");
+}
+
+function formatSignedMoney(value) {
+  if (value > 0) return `+${money.format(value)}`;
+  if (value < 0) return `-${money.format(Math.abs(value))}`;
+  return money.format(0);
+}
+
+function formatSignedPercent(value) {
+  if (!Number.isFinite(value) || value === 0) return "0%";
+  const text = `${Math.abs(value * 100).toFixed(1)}%`;
+  return value > 0 ? `+${text}` : `-${text}`;
+}
+
+function generateComparisonSummary(currentMonth, previousMonth, current, previous, delta, rate, increased, decreased) {
+  const direction = delta > 0 ? "增加" : delta < 0 ? "减少" : "持平";
+  const lead = `${currentMonth} 总支出较 ${previousMonth} ${direction} ${money.format(Math.abs(delta))}，环比 ${formatSignedPercent(rate)}。`;
+  const upText = increased.length ? `增加较多的类别是 ${increased.map((item) => `${item.name} ${formatSignedMoney(item.delta)}`).join("、")}。` : "没有明显增加的支出类别。";
+  const downText = decreased.length ? `减少较多的类别是 ${decreased.map((item) => `${item.name} ${formatSignedMoney(item.delta)}`).join("、")}。` : "没有明显减少的支出类别。";
+  return `${lead}\n\n${upText}\n${downText}`;
+}
+
 function isValidCustomCategory(name) {
   const value = cleanCell(name);
   return Boolean(value && value !== "人情往来");
@@ -331,6 +742,7 @@ function clearStoredTransactions() {
   localStorage.removeItem(STORAGE_KEY);
   allTransactions = [];
   pendingFiles = [];
+  currentTablePage = 1;
   billUploader.value = "";
   uploadConfirm.classList.add("hidden");
   uploadConfirm.innerHTML = "";
@@ -341,6 +753,7 @@ function clearStoredTransactions() {
 function resetDashboard() {
   const monthFilter = document.getElementById("monthFilter");
   currentTableTransactions = [];
+  currentTablePage = 1;
   monthFilter.innerHTML = '<option value="">暂无数据</option>';
   monthFilter.disabled = true;
   Object.values(charts).forEach((chart) => chart.destroy());
@@ -361,6 +774,7 @@ function updateActionButtons() {
   clearStorageButton.disabled = !hasData && !localStorage.getItem(STORAGE_KEY);
   exportExcelButton.disabled = !hasData;
   exportPdfButton.disabled = !hasData;
+  if (saveToMonthlyBillsButton) saveToMonthlyBillsButton.disabled = !hasData;
 }
 
 function markUnsaved() {
@@ -383,6 +797,104 @@ function handleBeforeUnload(event) {
   event.returnValue = "";
 }
 
+function getActiveMonthKey() {
+  return document.getElementById("monthFilter").value || "all";
+}
+
+function getActiveMonthLabel() {
+  const key = getActiveMonthKey();
+  return key === "all" ? "全部月份" : key;
+}
+
+function getCurrentMonthBudget() {
+  const value = Number(monthlyBudgets[getActiveMonthKey()]);
+  return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+function saveCurrentMonthBudget() {
+  const value = Number(monthlyBudgetInput?.value);
+  if (!Number.isFinite(value) || value <= 0) {
+    setStatus("请输入大于 0 的本月预算。");
+    return;
+  }
+
+  monthlyBudgets[getActiveMonthKey()] = value;
+  saveMonthlyBudgets();
+  renderBudgetPanel();
+  setStatus(`已保存 ${getActiveMonthLabel()} 预算：${money.format(value)}。`);
+}
+
+function clearCurrentMonthBudget() {
+  delete monthlyBudgets[getActiveMonthKey()];
+  saveMonthlyBudgets();
+  if (monthlyBudgetInput) monthlyBudgetInput.value = "";
+  renderBudgetPanel();
+  setStatus(`已清除 ${getActiveMonthLabel()} 的预算提醒。`);
+}
+
+function getBudgetStatus(totalExpense, budget) {
+  const used = Math.max(0, Number(totalExpense) || 0);
+  const limit = Number(budget) || 0;
+
+  if (!limit) {
+    return {
+      level: "empty",
+      percent: 0,
+      remaining: 0,
+      text: "未设置预算，保存后会显示本月使用进度。",
+      pdfText: "未设置",
+    };
+  }
+
+  const remaining = limit - used;
+  const percent = limit ? Math.min(100, Math.round((used / limit) * 100)) : 0;
+  if (used > limit) {
+    return {
+      level: "danger",
+      percent,
+      remaining,
+      text: `本月已超出预算 ${money.format(Math.abs(remaining))}。`,
+      pdfText: `已超出预算 ${money.format(Math.abs(remaining))}`,
+    };
+  }
+  if (used / limit >= 0.8) {
+    return {
+      level: "warning",
+      percent,
+      remaining,
+      text: `预算使用率已达到 ${percent}%，接下来可以稍微留意支出节奏。`,
+      pdfText: `已使用 ${percent}%，接近预算上限`,
+    };
+  }
+  return {
+    level: "safe",
+    percent,
+    remaining,
+    text: `预算使用率 ${percent}%，当前支出仍在安全范围内。`,
+    pdfText: `已使用 ${percent}%，预算充足`,
+  };
+}
+
+function renderBudgetPanel() {
+  if (!budgetAmount || !budgetUsed || !budgetRemaining || !budgetProgress || !budgetStatus) return;
+
+  const summary = getCurrentReportSummary();
+  const budget = getCurrentMonthBudget();
+  const status = getBudgetStatus(summary.totalExpense, budget);
+
+  budgetMonthLabel.textContent = getActiveMonthLabel();
+  if (monthlyBudgetInput) monthlyBudgetInput.value = budget ? String(budget) : "";
+  budgetAmount.textContent = budget ? money.format(budget) : "未设置";
+  budgetUsed.textContent = money.format(summary.totalExpense);
+  budgetRemaining.textContent = budget ? money.format(status.remaining) : "未设置";
+  budgetRemaining.className = status.level;
+  budgetProgress.className = `budget-progress-bar ${status.level}`;
+  budgetProgress.style.width = `${budget ? Math.min(status.percent, 100) : 0}%`;
+  budgetStatus.className = `budget-status ${status.level}`;
+  budgetStatus.textContent = status.text;
+  clearBudgetButton.disabled = !budget;
+}
+
 function getCurrentMonthTransactions() {
   const month = document.getElementById("monthFilter").value;
   return month ? allTransactions.filter((item) => monthKey(item.date) === month) : allTransactions.slice();
@@ -396,6 +908,7 @@ function getCurrentReportSummary() {
   const totalIncome = sum(incomes);
   const totalRefund = sum(refunds);
   const totalExpense = Math.max(0, sum(expenses) - totalRefund);
+  const budget = getCurrentMonthBudget();
 
   return {
     month: document.getElementById("monthFilter").value || "全部月份",
@@ -409,6 +922,8 @@ function getCurrentReportSummary() {
     net: totalIncome - totalExpense,
     category: aggregateNet(expenses, refunds, "category"),
     platform: aggregateNet(expenses, refunds, "platform"),
+    budget,
+    budgetStatus: getBudgetStatus(totalExpense, budget),
     summaryText: document.getElementById("aiSummary").textContent.trim(),
   };
 }
@@ -460,6 +975,7 @@ function exportReportToPdf() {
       ${renderPdfMetric("消费笔数", String(report.expenses.length))}
     </div>
     <h2 style="font-size:18px;margin:0 0 10px;">AI 月度总结</h2>
+    <p style="line-height:1.8;margin:0 0 22px;">本月预算：${report.budget ? money.format(report.budget) : "未设置"}；预算状态：${report.budgetStatus?.pdfText || "未设置"}</p>
     <p style="white-space:pre-line;line-height:1.8;margin:0 0 22px;">${escapeHtml(report.summaryText)}</p>
     <h2 style="font-size:18px;margin:0 0 10px;">分类支出摘要</h2>
     ${renderPdfList(report.category)}
@@ -509,7 +1025,9 @@ function renderPdfList(items) {
 }
 
 document.getElementById("monthFilter").addEventListener("change", (event) => {
+  currentTablePage = 1;
   renderSelectedMonth(event.target.value);
+  renderBudgetPanel();
 });
 
 async function readBillFile(file) {
@@ -1215,6 +1733,7 @@ function renderDashboard(transactions) {
   currentTableTransactions = sortTransactionsForTable(transactions);
   updateFilterOptions();
   applyTableFilters();
+  renderBudgetPanel();
 }
 
 function sortTransactionsForTable(transactions) {
@@ -1325,6 +1844,8 @@ function renderSummary(stats) {
   const topCategory = category[0];
   const topPlatform = platform[0];
   const topMerchant = merchants[0];
+  const budget = getCurrentMonthBudget();
+  const budgetStatus = getBudgetStatus(stats.totalExpense, budget);
   const netText = stats.net >= 0 ? `结余 ${money.format(stats.net)}` : `净支出 ${money.format(Math.abs(stats.net))}`;
 
   const lines = [
@@ -1334,15 +1855,17 @@ function renderSummary(stats) {
     topPlatform ? `从支付平台看，「${topPlatform.name}」支出最多，约 ${money.format(topPlatform.value)}；高频交易对象是「${topMerchant?.name || "暂无"}」。` : "平台支出还不明显，上传更多账单后会更完整。",
     largeItems.length ? `值得留意的大额消费包括：${largeItems.map((item) => `${item.merchant} ${money.format(item.amount)}`).join("、")}。` : "",
     "下月可以优先关注占比最高的类别和大额消费，给固定开销留出预算，再为弹性消费设置一个舒服的上限。这里的建议只用于日常消费管理，不涉及投资理财判断。",
+    budget ? `预算提醒：${budgetStatus.text}` : "预算提醒：本月还没有设置预算，设置后可以看到支出进度和剩余额度。",
   ].filter(Boolean);
 
   document.getElementById("aiSummary").textContent = lines.join("\n\n");
 }
 
-function renderTable(rows, total, filteredCount = rows.length) {
+function renderTable(rows, total, filteredCount = rows.length, totalPages = 0) {
   const tbody = document.getElementById("transactionTable");
   const hint = document.getElementById("tableHint");
-  hint.textContent = total ? `共 ${total} 条，当前筛选显示 ${filteredCount} 条。` : "展示前 100 条整理后的交易";
+  const displayPage = filteredCount ? currentTablePage : 0;
+  hint.textContent = `共 ${filteredCount} 条明细，当前显示第 ${displayPage} / ${totalPages} 页`;
 
   if (!rows.length) {
     tbody.innerHTML = `<tr><td colspan="7" class="empty-row">${total ? "没有符合条件的明细" : "还没有账单数据，上传账单后将在这里显示整理后的明细。"}</td></tr>`;
@@ -1417,6 +1940,7 @@ function handleHeaderFilterOptionClick(event) {
   if (!option) return;
   if (!activeHeaderFilter) return;
   tableFilters[activeHeaderFilter] = option.dataset.value || "";
+  currentTablePage = 1;
   updateHeaderFilterButtons();
   applyTableFilters();
   headerFilterMenu.classList.add("hidden");
@@ -1469,10 +1993,79 @@ function getFilteredTransactions() {
 
 function applyTableFilters() {
   const filtered = getFilteredTransactions();
-  renderTable(filtered.slice(0, 100), currentTableTransactions.length, filtered.length);
+  const totalPages = Math.ceil(filtered.length / PAGE_SIZE);
+  if (totalPages && currentTablePage > totalPages) {
+    currentTablePage = totalPages;
+  }
+  if (currentTablePage < 1) {
+    currentTablePage = 1;
+  }
+  const sortedTransactions = [...filtered].sort((a, b) => {
+    const timeA = a.date instanceof Date ? a.date.getTime() : new Date(a.date).getTime();
+    const timeB = b.date instanceof Date ? b.date.getTime() : new Date(b.date).getTime();
+    return timeB - timeA;
+  });
+  const start = (currentTablePage - 1) * PAGE_SIZE;
+  const end = start + PAGE_SIZE;
+  const pageTransactions = sortedTransactions.slice(start, end);
+  renderTable(pageTransactions, currentTableTransactions.length, filtered.length, totalPages);
+  renderTablePagination(filtered.length);
+}
+
+function renderTablePagination(totalItems) {
+  if (!tablePagination) return;
+  const totalPages = Math.ceil(totalItems / PAGE_SIZE);
+  if (!totalItems) {
+    tablePagination.innerHTML = "";
+    return;
+  }
+
+  const pages = getPaginationPages(currentTablePage, totalPages);
+  const pageButtons = pages
+    .map((page) => {
+      if (page === "...") {
+        return '<span class="pagination-ellipsis">...</span>';
+      }
+      return `<button class="pagination-button ${page === currentTablePage ? "active" : ""}" type="button" data-page="${page}" aria-label="第 ${page} 页">${page}</button>`;
+    })
+    .join("");
+
+  tablePagination.innerHTML = `
+    <button class="pagination-button" type="button" data-page="${currentTablePage - 1}" ${currentTablePage === 1 ? "disabled" : ""}>上一页</button>
+    ${pageButtons}
+    <button class="pagination-button" type="button" data-page="${currentTablePage + 1}" ${currentTablePage === totalPages ? "disabled" : ""}>下一页</button>
+  `;
+}
+
+function getPaginationPages(currentPage, totalPages) {
+  if (totalPages <= 7) {
+    return Array.from({ length: totalPages }, (_, index) => index + 1);
+  }
+
+  const pages = [1];
+  const start = Math.max(2, currentPage - 1);
+  const end = Math.min(totalPages - 1, currentPage + 1);
+
+  if (start > 2) pages.push("...");
+  for (let page = start; page <= end; page += 1) {
+    pages.push(page);
+  }
+  if (end < totalPages - 1) pages.push("...");
+  pages.push(totalPages);
+  return pages;
+}
+
+function handleTablePaginationClick(event) {
+  const button = event.target.closest("[data-page]");
+  if (!button || button.disabled) return;
+  const page = Number(button.dataset.page);
+  if (!Number.isInteger(page) || page === currentTablePage) return;
+  currentTablePage = page;
+  applyTableFilters();
 }
 
 function handleSearchInput() {
+  currentTablePage = 1;
   applyTableFilters();
 }
 
@@ -1481,6 +2074,7 @@ function resetTableFilters() {
   Object.keys(tableFilters).forEach((key) => {
     tableFilters[key] = "";
   });
+  currentTablePage = 1;
   updateHeaderFilterButtons();
   applyTableFilters();
 }
@@ -1565,7 +2159,14 @@ function handleTransactionEdit(event) {
     transaction.category = event.target.value;
   }
 
+  const tableTransaction = currentTableTransactions.find((item) => item.id === id);
+  if (tableTransaction && tableTransaction !== transaction) {
+    tableTransaction.type = transaction.type;
+    tableTransaction.category = transaction.category;
+  }
+
   renderSelectedMonth(document.getElementById("monthFilter").value);
+  saveTransactionsToStorage();
   markUnsaved();
 }
 
@@ -1672,4 +2273,6 @@ function setLoading(isLoading) {
   loadingOverlay.classList.toggle("hidden", !isLoading);
   uploadPanel.classList.toggle("is-loading", isLoading);
   billUploader.disabled = isLoading;
+  if (monthlyBillsUploader) monthlyBillsUploader.disabled = isLoading;
+  if (chooseMonthlyBillFileButton) chooseMonthlyBillFileButton.disabled = isLoading;
 }
