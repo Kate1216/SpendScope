@@ -53,6 +53,7 @@ let currentTableTransactions = [];
 
 const billUploader = document.getElementById("billUploader");
 const uploadPanel = document.querySelector(".upload-panel");
+const chooseBillFileButton = document.getElementById("chooseBillFile");
 const uploadConfirm = document.getElementById("uploadConfirm");
 const saveLocalButton = document.getElementById("saveLocal");
 const clearStorageButton = document.getElementById("clearStorage");
@@ -117,8 +118,29 @@ cancelCategoryModalButton.addEventListener("click", closeCategoryModal);
 addCategoryButton.addEventListener("click", addCustomCategory);
 updateActionButtons();
 
-billUploader.addEventListener("change", async (event) => {
-  handleSelectedFiles(Array.from(event.target.files || []));
+billUploader.addEventListener("change", (event) => {
+  console.log("[Mobile Upload] change fired");
+  const files = Array.from(event.target.files || []);
+  console.log("[Mobile Upload] files:", files);
+  if (files.length > 0) {
+    handleSelectedFiles(files);
+  }
+});
+
+chooseBillFileButton?.addEventListener("click", (event) => {
+  event.stopPropagation();
+  billUploader.click();
+});
+
+uploadPanel.addEventListener("click", (event) => {
+  if (event.target === billUploader || event.target === chooseBillFileButton) return;
+  billUploader.click();
+});
+
+uploadPanel.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter" && event.key !== " ") return;
+  event.preventDefault();
+  billUploader.click();
 });
 
 ["dragenter", "dragover"].forEach((eventName) => {
@@ -143,6 +165,7 @@ uploadPanel.addEventListener("drop", async (event) => {
 function handleSelectedFiles(files) {
   if (!files.length) return;
   pendingFiles = files;
+  console.log("[Mobile Upload] pendingFiles:", pendingFiles);
   const count = pendingFiles.length;
   uploadConfirm.innerHTML = `
     <p>已选择 ${count} 个文件，是否开始上传并生成月度账单报告？</p>
@@ -152,7 +175,17 @@ function handleSelectedFiles(files) {
     </div>
   `;
   uploadConfirm.classList.remove("hidden");
+  uploadConfirm.innerHTML = `
+    <p>已选择 ${count} 个文件，是否开始上传并生成月度账单报告？</p>
+    <div class="upload-actions">
+      <button class="primary" type="button" id="confirmUpload">开始分析</button>
+      <button class="secondary" type="button" id="cancelUpload">取消</button>
+    </div>
+  `;
+  console.log("[Mobile Upload] uploadConfirm visible");
+  setStatus("已选择文件，等待确认上传。");
   setStatus(`已选择 ${count} 个文件，等待确认上传。`);
+  setStatus("已选择文件，等待确认上传。");
   document.getElementById("confirmUpload").addEventListener("click", confirmUploadFiles);
   document.getElementById("cancelUpload").addEventListener("click", cancelUploadFiles);
 }
@@ -167,6 +200,7 @@ async function confirmUploadFiles() {
     await processFiles(files);
   } finally {
     setLoading(false);
+    billUploader.value = "";
   }
 }
 

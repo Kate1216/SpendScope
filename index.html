@@ -23,12 +23,13 @@
           </div>
         </div>
         <div class="upload-card">
-          <label class="upload-panel" for="billUploader">
+          <div class="upload-panel" role="button" tabindex="0" aria-controls="billUploader">
             <input id="billUploader" type="file" accept=".csv,.xlsx,.xls,.pdf" multiple />
             <span class="upload-icon">+</span>
             <strong>上传账单文件</strong>
             <small>支持 CSV、XLSX、XLS、PDF，可一次上传多个平台账单</small>
-          </label>
+            <button id="chooseBillFile" class="upload-choose-button" type="button">选择账单文件</button>
+          </div>
           <p class="upload-privacy">账单数据默认在浏览器本地处理，不上传服务器。</p>
         </div>
         <div id="uploadConfirm" class="upload-confirm hidden"></div>
