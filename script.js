@@ -48,6 +48,7 @@ const CUSTOM_CATEGORY_KEY = "spendscope_custom_categories";
 const BUDGET_STORAGE_KEY = "spendscope.monthlyBudgets.v1";
 const MONTHLY_BILLS_KEY = "spendscope.monthlyBills.v1";
 const ACTIVE_PAGE_KEY = "spendscope.activePage.v1";
+const LOGIN_STATE_KEY = "spendscope.loginState.v1";
 const VALID_PAGES = ["overview", "details", "trends"];
 const PAGE_SIZE = 20;
 let allTransactions = [];
@@ -126,16 +127,32 @@ let tableFilterOptions = {
   transactionType: [],
 };
 
+const appShell = document.querySelector(".app-shell");
+const loginPage = document.getElementById("loginPage");
+const loginAccountInput = document.getElementById("loginAccount");
+const loginPasswordInput = document.getElementById("loginPassword");
+const loginButton = document.getElementById("loginButton");
+const guestLoginButton = document.getElementById("guestLoginButton");
+const logoutButton = document.getElementById("logoutButton");
+const loginMessage = document.getElementById("loginMessage");
+const loginTabs = Array.from(document.querySelectorAll(".login-tab"));
+
 document.addEventListener("DOMContentLoaded", () => {
-  loadMonthlyBudgets();
-  loadMonthlyBills();
-  loadCustomCategories();
-  restoreDashboardFromStorage();
-  updateFilterOptions();
-  renderBudgetPanel();
-  renderMonthlyBills();
-  const savedPage = localStorage.getItem(ACTIVE_PAGE_KEY);
-  switchPage(VALID_PAGES.includes(savedPage) ? savedPage : "overview");
+  try {
+    const loginState = getLoginState();
+    loadMonthlyBudgets();
+    loadMonthlyBills();
+    loadCustomCategories();
+    restoreDashboardFromStorage();
+    updateFilterOptions();
+    renderBudgetPanel();
+    renderMonthlyBills();
+    const savedPage = localStorage.getItem(ACTIVE_PAGE_KEY);
+    switchPage(VALID_PAGES.includes(savedPage) ? savedPage : "overview");
+    renderAuthState(Boolean(loginState?.loggedIn));
+  } finally {
+    document.body.classList.remove("app-initializing");
+  }
 });
 
 window.addEventListener("beforeunload", handleBeforeUnload);
@@ -166,6 +183,20 @@ monthlyBudgetInput?.addEventListener("keydown", (event) => {
 });
 pageTabs.forEach((tab) => {
   tab.addEventListener("click", () => switchPage(tab.dataset.page));
+});
+loginTabs.forEach((tab) => {
+  tab.addEventListener("click", () => {
+    loginTabs.forEach((item) => item.classList.toggle("active", item === tab));
+  });
+});
+loginButton?.addEventListener("click", handleLocalLogin);
+guestLoginButton?.addEventListener("click", handleGuestLogin);
+logoutButton?.addEventListener("click", handleLogout);
+loginAccountInput?.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") handleLocalLogin();
+});
+loginPasswordInput?.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") handleLocalLogin();
 });
 updateActionButtons();
 
@@ -557,6 +588,70 @@ function deleteMonthlyBill(month) {
   saveMonthlyBills();
   renderMonthlyBills();
   setStatus(`已删除 ${month} 月度账单。`);
+}
+
+function getLoginState() {
+  try {
+    const raw = localStorage.getItem(LOGIN_STATE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch (error) {
+    console.warn("[SpendScope Login] Failed to read login state:", error);
+    localStorage.removeItem(LOGIN_STATE_KEY);
+    return null;
+  }
+}
+
+function saveLoginState(mode) {
+  localStorage.setItem(
+    LOGIN_STATE_KEY,
+    JSON.stringify({
+      loggedIn: true,
+      mode,
+      loginAt: new Date().toISOString(),
+    })
+  );
+  renderAuthState(true);
+}
+
+function renderAuthState(isLoggedIn) {
+  loginPage?.classList.toggle("is-hidden", isLoggedIn);
+  appShell?.classList.toggle("is-hidden", !isLoggedIn);
+  if (isLoggedIn && activePage === "trends") {
+    requestAnimationFrame(() => {
+      Object.values(charts).forEach((chart) => {
+        chart?.resize?.();
+        chart?.update?.();
+      });
+    });
+  }
+}
+
+function showLoginMessage(message) {
+  if (!loginMessage) return;
+  loginMessage.textContent = message;
+}
+
+function handleLocalLogin() {
+  const account = loginAccountInput?.value.trim() || "";
+  if (!account) {
+    showLoginMessage("请输入手机号或邮箱");
+    loginAccountInput?.focus();
+    return;
+  }
+  showLoginMessage("");
+  saveLoginState("local");
+}
+
+function handleGuestLogin() {
+  showLoginMessage("");
+  saveLoginState("guest");
+}
+
+function handleLogout() {
+  localStorage.removeItem(LOGIN_STATE_KEY);
+  if (loginPasswordInput) loginPasswordInput.value = "";
+  showLoginMessage("");
+  renderAuthState(false);
 }
 
 function switchPage(page) {

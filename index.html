@@ -4,15 +4,50 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>SpendScope | AI Monthly Bill Assistant</title>
+    <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
     <link rel="preconnect" href="https://cdn.jsdelivr.net" />
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body class="app-initializing">
+    <section id="loginPage" class="login-page is-hidden">
+      <div class="login-brand">
+        <p class="eyebrow">AI Monthly Bill Assistant</p>
+        <h1>SpendScope</h1>
+        <p>上传微信、支付宝或银行卡账单，生成清晰的月度消费分析。</p>
+        <div class="login-points">
+          <span>本地解析</span>
+          <span>月度账单</span>
+          <span>隐私友好</span>
+        </div>
+      </div>
+
+      <div class="login-card">
+        <div class="login-tabs" aria-label="登录注册切换">
+          <button class="login-tab active" type="button" data-login-tab="login">登录</button>
+          <button class="login-tab" type="button" data-login-tab="register">注册</button>
+        </div>
+        <div class="login-form">
+          <label class="login-field">
+            <span>手机号或邮箱</span>
+            <input id="loginAccount" type="text" autocomplete="username" placeholder="请输入手机号或邮箱" />
+          </label>
+          <label class="login-field">
+            <span>密码</span>
+            <input id="loginPassword" type="password" autocomplete="current-password" placeholder="本地体验模式可不校验" />
+          </label>
+          <p id="loginMessage" class="login-message"></p>
+          <button id="loginButton" class="login-primary-button" type="button">登录</button>
+          <button id="guestLoginButton" class="login-secondary-button" type="button">游客体验</button>
+          <p class="login-note">当前版本为本地体验模式，账单数据默认保存在浏览器本地。</p>
+        </div>
+      </div>
+    </section>
     <main class="app-shell">
       <nav class="page-tabs">
         <button class="page-tab active" type="button" data-page="overview">本月总览</button>
         <button class="page-tab" type="button" data-page="details">账单明细</button>
         <button class="page-tab" type="button" data-page="trends">趋势分析</button>
+        <button id="logoutButton" class="logout-button" type="button">退出登录</button>
       </nav>
 
       <section id="overviewPage" class="app-page active">
