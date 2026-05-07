@@ -904,17 +904,14 @@ function getTransactionsByMonth(month) {
 
 function getMonthExpenseSummary(month) {
   const transactions = getTransactionsByMonth(month);
-  const expenses = transactions.filter((item) => item.type === TYPE_OPTIONS[0]);
-  const refunds = transactions.filter((item) => item.type === TYPE_OPTIONS[2]);
-  const totalRefund = sum(refunds);
-  const totalExpense = Math.max(0, sum(expenses) - totalRefund);
+  const netSummary = getNetExpenseSummary(transactions);
   return {
     month,
     transactions,
-    expenses,
-    refunds,
-    totalExpense,
-    category: aggregateNet(expenses, refunds, "category"),
+    expenses: netSummary.netExpenses,
+    refunds: netSummary.refunds,
+    totalExpense: netSummary.totalExpense,
+    category: aggregateNet(netSummary.netExpenses, netSummary.unpairedRefunds, "category"),
   };
 }
 
@@ -1217,12 +1214,13 @@ function getCurrentMonthTransactions() {
 
 function getCurrentReportSummary() {
   const transactions = getCurrentMonthTransactions();
-  const expenses = transactions.filter((item) => item.type === "支出");
-  const incomes = transactions.filter((item) => item.type === "收入");
-  const refunds = transactions.filter((item) => item.type === "退款");
+  const netSummary = getNetExpenseSummary(transactions);
+  const expenses = netSummary.netExpenses;
+  const incomes = netSummary.incomes;
+  const refunds = netSummary.refunds;
   const totalIncome = sum(incomes);
-  const totalRefund = sum(refunds);
-  const totalExpense = Math.max(0, sum(expenses) - totalRefund);
+  const totalRefund = netSummary.totalRefund;
+  const totalExpense = netSummary.totalExpense;
   const budget = getCurrentMonthBudget();
 
   return {
@@ -1235,8 +1233,9 @@ function getCurrentReportSummary() {
     totalExpense,
     totalRefund,
     net: totalIncome - totalExpense,
-    category: aggregateNet(expenses, refunds, "category"),
-    platform: aggregateNet(expenses, refunds, "platform"),
+    category: aggregateNet(expenses, netSummary.unpairedRefunds, "category"),
+    platform: aggregateNet(expenses, netSummary.unpairedRefunds, "platform"),
+    unpairedRefunds: netSummary.unpairedRefunds,
     budget,
     budgetStatus: getBudgetStatus(totalExpense, budget),
     summaryText: document.getElementById("aiSummary").textContent.trim(),
@@ -1701,6 +1700,7 @@ function normalizeCategoryForType(type, category, input = "") {
 
 function getNetExpenseSummary(transactions) {
   const expenses = transactions.filter((item) => item.type === "支出");
+  const incomes = transactions.filter((item) => item.type === "收入");
   const refunds = transactions.filter((item) => item.type === "退款");
   const pairedRefunds = refunds.filter((item) => item.refundGroupKey);
   const unpairedRefunds = refunds.filter((item) => !item.refundGroupKey);
@@ -1714,16 +1714,26 @@ function getNetExpenseSummary(transactions) {
 
   const grossExpense = sum(expenses);
   const pairedOriginalExpenses = expenses.filter((item) => item.refundPairRole === "originalExpense" && item.refundGroupKey);
-  const totalExpenseBeforeUnpairedRefund = expenses.reduce((total, item) => {
+  const netExpenses = expenses.reduce((items, item) => {
     if (item.refundPairRole !== "originalExpense" || !item.refundGroupKey) {
-      return total + Number(item.amount || 0);
+      items.push(item);
+      return items;
     }
 
     const explicitRefundedAmount = Number(item.refundedAmount);
     const matchedRefundAmount = Number.isFinite(explicitRefundedAmount) ? explicitRefundedAmount : refundAmountByGroup.get(item.refundGroupKey) || 0;
-    return total + Math.max(0, Number(item.amount || 0) - matchedRefundAmount);
-  }, 0);
-  const totalExpense = Math.max(0, totalExpenseBeforeUnpairedRefund - unpairedRefundAmount);
+    const netAmount = Math.max(0, Number(item.amount || 0) - matchedRefundAmount);
+    if (netAmount > 0) {
+      items.push({
+        ...item,
+        amount: roundMoneyAmount(netAmount),
+        originalAmount: item.amount,
+        refundedAmount: roundMoneyAmount(matchedRefundAmount),
+      });
+    }
+    return items;
+  }, []);
+  const totalExpense = Math.max(0, sum(netExpenses) - unpairedRefundAmount);
 
   console.info("[Refund Net Summary]", {
     transactions: transactions.length,
@@ -1736,9 +1746,20 @@ function getNetExpenseSummary(transactions) {
     pairedRefunds: pairedRefunds.length,
     unpairedRefunds: unpairedRefunds.length,
   });
+  console.info("[Refund Net Stats Applied]", {
+    transactions: transactions.length,
+    netExpenses: netExpenses.length,
+    grossExpense,
+    pairedRefundAmount,
+    unpairedRefundAmount,
+    totalRefund,
+    totalExpense,
+  });
 
   return {
     expenses,
+    netExpenses,
+    incomes,
     refunds,
     pairedRefunds,
     unpairedRefunds,
@@ -1752,27 +1773,25 @@ function getNetExpenseSummary(transactions) {
 
 function renderDashboard(transactions) {
   const netExpenseSummary = getNetExpenseSummary(transactions);
-  const expenses = netExpenseSummary.expenses;
-  const incomes = transactions.filter((item) => item.type === "收入");
+  const expenses = netExpenseSummary.netExpenses;
+  const incomes = netExpenseSummary.incomes;
   const refunds = netExpenseSummary.refunds;
+  const unpairedRefunds = netExpenseSummary.unpairedRefunds;
   const totalIncome = sum(incomes);
   const totalRefund = netExpenseSummary.totalRefund;
   const totalExpense = netExpenseSummary.totalExpense;
   const net = totalIncome - totalExpense;
-  const summaryTotalRefund = sum(refunds);
-  const summaryTotalExpense = Math.max(0, sum(expenses) - summaryTotalRefund);
-  const summaryNet = totalIncome - summaryTotalExpense;
 
   document.getElementById("totalIncome").textContent = money.format(totalIncome);
   document.getElementById("totalExpense").textContent = money.format(totalExpense);
   document.getElementById("netAmount").textContent = money.format(net);
   document.getElementById("expenseCount").textContent = expenses.length;
 
-  renderChart("categoryChart", "pie", aggregateNet(expenses, refunds, "category"), "分类支出");
-  renderChart("platformChart", "bar", aggregateNet(expenses, refunds, "platform"), "平台支出");
-  renderDailyChart(expenses, refunds);
+  renderChart("categoryChart", "pie", aggregateNet(expenses, unpairedRefunds, "category"), "分类支出");
+  renderChart("platformChart", "bar", aggregateNet(expenses, unpairedRefunds, "platform"), "平台支出");
+  renderDailyChart(expenses, unpairedRefunds);
   document.getElementById("aiSummary").textContent = "正在整理你的月度消费洞察…";
-  renderSummary({ transactions, expenses, incomes, refunds, totalIncome, totalExpense: summaryTotalExpense, totalRefund: summaryTotalRefund, net: summaryNet });
+  renderSummary({ transactions, expenses, incomes, refunds, unpairedRefunds, totalIncome, totalExpense, totalRefund, net });
   currentTableTransactions = sortTransactionsForTable(transactions);
   updateFilterOptions();
   applyTableFilters();
@@ -1989,8 +2008,9 @@ function drawCanvasMessage(canvas, message) {
 }
 
 function renderSummary(stats) {
-  const category = aggregateNet(stats.expenses, stats.refunds, "category");
-  const platform = aggregateNet(stats.expenses, stats.refunds, "platform");
+  const refundAdjustments = stats.unpairedRefunds || stats.refunds;
+  const category = aggregateNet(stats.expenses, refundAdjustments, "category");
+  const platform = aggregateNet(stats.expenses, refundAdjustments, "platform");
   const merchants = aggregate(stats.expenses, "merchant");
   const largeItems = stats.expenses.slice().sort((a, b) => b.amount - a.amount).slice(0, 3);
   const topCategory = category[0];
@@ -2501,6 +2521,10 @@ function aggregateNetByDay(expenses, refunds) {
 
 function sum(items) {
   return items.reduce((total, item) => total + item.amount, 0);
+}
+
+function roundMoneyAmount(value) {
+  return Math.round((Number(value) + Number.EPSILON) * 100) / 100;
 }
 
 function percent(value, total) {

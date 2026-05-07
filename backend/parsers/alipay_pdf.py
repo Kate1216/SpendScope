@@ -91,15 +91,17 @@ def _convert_alipay_raw_row(raw_row) -> dict | None:
     if trade_time is None:
         return None
 
-    description = _clean_text(raw_row[2])
+    merchant = clean_alipay_display_text(raw_row[1])
+    description = clean_alipay_display_text(raw_row[2])
+    payment_method = clean_alipay_display_text(raw_row[3])
 
     return {
         "收/支": income_expense,
         "原始收支": income_expense,
-        "交易对方": _clean_text(raw_row[1]),
+        "交易对方": merchant,
         "商品说明": description,
         "交易说明": description,
-        "收/付款方式": _clean_compact_text(raw_row[3]),
+        "收/付款方式": payment_method,
         "金额": amount,
         "交易订单号": _clean_identifier(raw_row[5]),
         "商家订单号": _clean_identifier(raw_row[6]),
@@ -127,6 +129,21 @@ def _clean_income_expense(value) -> str | None:
 
 def _clean_text(value) -> str:
     return re.sub(r"\s+", " ", str(value or "").replace("\n", " ")).strip()
+
+
+def clean_alipay_display_text(text) -> str:
+    value = _clean_text(text)
+    if not value:
+        return ""
+
+    # PDF table extraction often inserts spaces inside Chinese words at line breaks.
+    value = re.sub(r"(?<=[\u4e00-\u9fff])\s+(?=[\u4e00-\u9fff])", "", value)
+    value = re.sub(r"(?<=[\u4e00-\u9fff])\s+(?=[（）()])", "", value)
+    value = re.sub(r"(?<=[（(])\s+(?=[\u4e00-\u9fffA-Za-z0-9])", "", value)
+    value = re.sub(r"\s*-\s*", "-", value)
+    value = re.sub(r"(?<=[\u4e00-\u9fff])\s+(?=[A-Za-z](?:\s|$|[）)]))", "", value)
+    value = re.sub(r"\s+", " ", value).strip()
+    return value
 
 
 def _clean_compact_text(value) -> str:
