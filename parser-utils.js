@@ -1,4 +1,4 @@
-﻿// Shared parser utilities for SpendScope. Loaded before script.js.
+// Shared parser utilities for SpendScope. Loaded before script.js.
 
 function addBillSourceMeta(row, platformFromFile, sourceFromFile) {
   const unknownSource = "\u672a\u77e5\u6765\u6e90";
@@ -247,4 +247,32 @@ function maskBankSensitiveText(text) {
 function maskDebugRow(row) {
   if (!row || typeof row !== "object") return row;
   return Object.fromEntries(Object.entries(row).map(([key, value]) => [key, maskBankSensitiveText(value)]));
+}
+
+if (typeof window !== "undefined") {
+  Object.assign(window, {
+    addBillSourceMeta,
+    cleanCell,
+    detectBillSourcePlatform,
+    detectDelimiter,
+    detectPlatform,
+    detectSourcePlatform,
+    firstKnownSourcePlatform,
+    getTransactionSourcePlatform,
+    guessMerchantFromPdfLine,
+    looksReadableBill,
+    maskBankSensitiveText,
+    maskDebugRow,
+    normalizeDateText,
+    normalizeStatementSourcePlatform,
+    normalizeTimeText,
+    parseAmount,
+    parseDate,
+    parseTransactionLine,
+    readTextFile,
+    splitDelimitedLine,
+    splitPdfLine,
+    textItemsToLines,
+    toNumber,
+  });
 }
