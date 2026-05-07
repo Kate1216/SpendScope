@@ -10,56 +10,46 @@ function applyCrossPlatformDedup(transactions) {
   if (!Array.isArray(transactions) || !transactions.length) {
     console.info("[Cross Dedup Applied]", {
       total: 0,
-      bankExpenseCandidates: 0,
-      paymentExpenseCandidates: 0,
+      sameSourceIgnored: 0,
+      crossSourceCandidates: 0,
       matched: 0,
       applied: 0,
-      matchedSamples: [],
+      expenseDuplicates: 0,
+      refundDuplicates: 0,
+      transferDuplicates: 0,
     });
     return transactions || [];
   }
 
-  const bankExpenses = transactions
-    .map((transaction, index) => ({ transaction, index }))
-    .filter(({ transaction }) => {
-      return (
-        getTransactionSourcePlatform(transaction) === "中国银行" &&
-        transaction.type === "支出" &&
-        Number.isFinite(Number(transaction.amount)) &&
-        Number(transaction.amount) > 0 &&
-        transaction.date instanceof Date &&
-        !Number.isNaN(transaction.date.getTime())
-      );
-    });
+  const transferResult = applyCrossPlatformTransferDedup(transactions);
+  transactions = transferResult.transactions;
+  const sameSourceIgnored = countSameSourceDedupIgnored(transactions);
 
-  const paymentExpenses = transactions
+  const bankCandidates = transactions
     .map((transaction, index) => ({ transaction, index }))
-    .filter(({ transaction }) => {
-      const source = getTransactionSourcePlatform(transaction);
-      return (
-        (source === "支付宝" || source === "微信") &&
-        transaction.type === "支出" &&
-        Number.isFinite(Number(transaction.amount)) &&
-        Number(transaction.amount) > 0 &&
-        transaction.date instanceof Date &&
-        !Number.isNaN(transaction.date.getTime())
-      );
-    });
+    .filter(({ transaction }) => isCrossDedupCandidate(transaction, ["中国银行"]) && transaction.transferPairRole !== "bankTransferDuplicate");
+
+  const paymentPlatformCandidates = transactions
+    .map((transaction, index) => ({ transaction, index }))
+    .filter(({ transaction }) => isCrossDedupCandidate(transaction, ["支付宝", "微信"]) && transaction.transferPairRole !== "primaryTransfer");
 
   console.info("[Cross Dedup Source Counts]", {
     total: transactions.length,
-    bankExpenseCandidates: bankExpenses.length,
-    paymentExpenseCandidates: paymentExpenses.length,
+    bankCandidates: bankCandidates.length,
+    paymentPlatformCandidates: paymentPlatformCandidates.length,
   });
 
   const usedPaymentIndexes = new Set();
   const updatedByIndex = new Map();
   const matchedSamples = [];
+  const duplicateStats = { expense: 0, income: 0, refund: 0 };
 
-  bankExpenses.forEach(({ transaction: bankTransaction, index: bankIndex }) => {
-    const candidates = paymentExpenses
+  bankCandidates.forEach(({ transaction: bankTransaction, index: bankIndex }) => {
+    const candidates = paymentPlatformCandidates
       .filter(({ transaction: paymentTransaction, index: paymentIndex }) => {
         if (usedPaymentIndexes.has(paymentIndex)) return false;
+
+        if (!isCrossDedupDirectionCompatible(bankTransaction, paymentTransaction)) return false;
 
         const amountDiff = Math.abs(Number(bankTransaction.amount) - Number(paymentTransaction.amount));
         if (amountDiff > CROSS_DEDUP_AMOUNT_TOLERANCE) return false;
@@ -93,11 +83,13 @@ function applyCrossPlatformDedup(transactions) {
     usedPaymentIndexes.add(best.paymentIndex);
 
     const paymentSource = getTransactionSourcePlatform(best.paymentTransaction);
+    const duplicateSemanticType = getCrossDedupSemanticType(bankTransaction, best.paymentTransaction);
     const duplicateGroupKey = `cross-dedup-${bankIndex}-${best.paymentIndex}`;
     const updatedPaymentTransaction = {
       ...best.paymentTransaction,
       duplicateGroupKey,
-      duplicatePairRole: "primaryPayment",
+      duplicatePairRole: "primaryPlatformRecord",
+      duplicatePlatform: "中国银行",
       duplicateMatchedBankMerchant: bankTransaction.merchant || "",
       duplicateMatchedBankDescription: bankTransaction.description || "",
       duplicateMatchedBankTime: bankTransaction.time || "",
@@ -106,11 +98,11 @@ function applyCrossPlatformDedup(transactions) {
     const updatedBankTransaction = {
       ...bankTransaction,
       type: "排除",
-      category: "重复扣款",
-      excludeReason: "重复扣款",
+      category: getCrossDedupExcludedCategory(bankTransaction, best.paymentTransaction),
+      excludeReason: "跨平台重复记录",
       duplicateGroupKey,
       duplicatePairRole: "bankDuplicate",
-      duplicateType: "支付平台重复扣款",
+      duplicateType: "跨平台重复记录",
       duplicatePlatform: paymentSource,
       duplicateMatchedMerchant: best.paymentTransaction.merchant || "",
       duplicateMatchedDescription: best.paymentTransaction.description || "",
@@ -120,8 +112,12 @@ function applyCrossPlatformDedup(transactions) {
 
     updatedByIndex.set(best.paymentIndex, updatedPaymentTransaction);
     updatedByIndex.set(bankIndex, updatedBankTransaction);
+    if (duplicateSemanticType === "支出") duplicateStats.expense += 1;
+    if (duplicateSemanticType === "收入") duplicateStats.income += 1;
+    if (duplicateSemanticType === "退款") duplicateStats.refund += 1;
 
     matchedSamples.push({
+      semanticType: duplicateSemanticType,
       bankTime: bankTransaction.time,
       bankMerchant: bankTransaction.merchant,
       bankDescription: bankTransaction.description,
@@ -137,8 +133,8 @@ function applyCrossPlatformDedup(transactions) {
   });
 
   console.info("[Cross Dedup Candidates]", {
-    bankExpenseCandidates: bankExpenses.length,
-    paymentExpenseCandidates: paymentExpenses.length,
+    bankCandidates: bankCandidates.length,
+    paymentPlatformCandidates: paymentPlatformCandidates.length,
     possibleMatches: matchedSamples.length,
     samples: matchedSamples.slice(0, 20),
   });
@@ -147,16 +143,188 @@ function applyCrossPlatformDedup(transactions) {
     return updatedByIndex.get(index) || transaction;
   });
 
-  console.info("[Cross Dedup Applied]", {
+  console.log("[Cross Source Dedup Applied]", {
     total: transactions.length,
-    bankExpenseCandidates: bankExpenses.length,
-    paymentExpenseCandidates: paymentExpenses.length,
+    sameSourceIgnored,
+    crossSourceCandidates: bankCandidates.length + paymentPlatformCandidates.length,
     matched: matchedSamples.length,
     applied: matchedSamples.length,
+    expenseDuplicates: duplicateStats.expense,
+    refundDuplicates: duplicateStats.income + duplicateStats.refund,
+    transferDuplicates: transferResult.matched,
     matchedSamples: matchedSamples.slice(0, 20),
   });
 
   return dedupedTransactions;
+}
+
+function isCrossDedupCandidate(transaction, sourcePlatforms) {
+  const source = getTransactionSourcePlatform(transaction);
+  return (
+    sourcePlatforms.includes(source) &&
+    ["支出", "收入", "退款"].includes(transaction?.type) &&
+    Number.isFinite(Number(transaction.amount)) &&
+    Number(transaction.amount) > 0 &&
+    transaction.date instanceof Date &&
+    !Number.isNaN(transaction.date.getTime())
+  );
+}
+
+function countSameSourceDedupIgnored(transactions) {
+  let ignored = 0;
+  for (let leftIndex = 0; leftIndex < transactions.length; leftIndex += 1) {
+    for (let rightIndex = leftIndex + 1; rightIndex < transactions.length; rightIndex += 1) {
+      const left = transactions[leftIndex];
+      const right = transactions[rightIndex];
+      const leftSource = getTransactionSourcePlatform(left);
+      if (!leftSource || leftSource !== getTransactionSourcePlatform(right)) continue;
+      if (!isCrossDedupComparable(left) || !isCrossDedupComparable(right)) continue;
+      if (!isCrossDedupDirectionCompatible(left, right)) continue;
+      if (Math.abs(Number(left.amount) - Number(right.amount)) > CROSS_DEDUP_AMOUNT_TOLERANCE) continue;
+      const timeDiffSeconds = Math.abs(left.date.getTime() - right.date.getTime()) / 1000;
+      if (timeDiffSeconds <= CROSS_DEDUP_TIME_WINDOW_SECONDS) ignored += 1;
+    }
+  }
+  return ignored;
+}
+
+function isCrossDedupComparable(transaction) {
+  return (
+    ["支出", "收入", "退款"].includes(transaction?.type) &&
+    Number.isFinite(Number(transaction.amount)) &&
+    Number(transaction.amount) > 0 &&
+    transaction.date instanceof Date &&
+    !Number.isNaN(transaction.date.getTime())
+  );
+}
+
+function applyCrossPlatformTransferDedup(transactions) {
+  const alipayTransferCandidates = transactions
+    .map((transaction, index) => ({ transaction, index }))
+    .filter(({ transaction }) => isAlipayTransferCandidate(transaction));
+  const bankTransferCandidates = transactions
+    .map((transaction, index) => ({ transaction, index }))
+    .filter(({ transaction }) => isBankTransferCandidate(transaction));
+  const usedBankIndexes = new Set();
+  const updatedByIndex = new Map();
+  const matchedSamples = [];
+
+  alipayTransferCandidates.forEach(({ transaction: alipayTransaction, index: alipayIndex }) => {
+    const candidates = bankTransferCandidates
+      .filter(({ transaction: bankTransaction, index: bankIndex }) => {
+        if (usedBankIndexes.has(bankIndex)) return false;
+        const amountDiff = Math.abs(Number(alipayTransaction.amount) - Number(bankTransaction.amount));
+        if (amountDiff > CROSS_DEDUP_AMOUNT_TOLERANCE) return false;
+        const timeDiffSeconds = Math.abs(alipayTransaction.date.getTime() - bankTransaction.date.getTime()) / 1000;
+        return timeDiffSeconds <= CROSS_DEDUP_TIME_WINDOW_SECONDS;
+      })
+      .map(({ transaction: bankTransaction, index: bankIndex }) => ({
+        bankTransaction,
+        bankIndex,
+        timeDiffSeconds: Math.abs(alipayTransaction.date.getTime() - bankTransaction.date.getTime()) / 1000,
+        amountDiff: Math.abs(Number(alipayTransaction.amount) - Number(bankTransaction.amount)),
+      }))
+      .sort((a, b) => {
+        if (a.timeDiffSeconds !== b.timeDiffSeconds) return a.timeDiffSeconds - b.timeDiffSeconds;
+        return a.amountDiff - b.amountDiff;
+      });
+
+    const best = candidates[0];
+    if (!best) return;
+
+    usedBankIndexes.add(best.bankIndex);
+    const groupKey = `cross-transfer-${alipayIndex}-${best.bankIndex}`;
+    updatedByIndex.set(alipayIndex, {
+      ...alipayTransaction,
+      type: "排除",
+      category: "账户转移",
+      excludeReason: "账户转移",
+      transferPairRole: "primaryTransfer",
+      transferGroupKey: groupKey,
+      duplicatePairRole: "primaryTransfer",
+      duplicateGroupKey: groupKey,
+      duplicatePlatform: "中国银行",
+    });
+    updatedByIndex.set(best.bankIndex, {
+      ...best.bankTransaction,
+      type: "排除",
+      category: "账户转移",
+      excludeReason: "跨平台账户转移",
+      transferPairRole: "bankTransferDuplicate",
+      transferGroupKey: groupKey,
+      duplicatePairRole: "bankTransferDuplicate",
+      duplicateGroupKey: groupKey,
+      duplicateType: "跨平台账户转移",
+      duplicatePlatform: "支付宝",
+    });
+    matchedSamples.push({
+      alipayTime: alipayTransaction.time,
+      bankTime: best.bankTransaction.time,
+      amount: alipayTransaction.amount,
+      timeDiffSeconds: Math.round(best.timeDiffSeconds),
+    });
+  });
+
+  console.log("[Cross Transfer Dedup Applied]", {
+    total: transactions.length,
+    alipayTransferCandidates: alipayTransferCandidates.length,
+    bankTransferCandidates: bankTransferCandidates.length,
+    matched: matchedSamples.length,
+    applied: matchedSamples.length,
+  });
+
+  return {
+    transactions: transactions.map((transaction, index) => updatedByIndex.get(index) || transaction),
+    matched: matchedSamples.length,
+  };
+}
+
+function isAlipayTransferCandidate(transaction) {
+  return (
+    getTransactionSourcePlatform(transaction) === "支付宝" &&
+    ["排除", "不计收支"].includes(transaction?.type) &&
+    Number.isFinite(Number(transaction.amount)) &&
+    Number(transaction.amount) > 0 &&
+    transaction.date instanceof Date &&
+    !Number.isNaN(transaction.date.getTime()) &&
+    /银行卡定时转入|自动转入|转入余额宝|余额宝转入|基金转入|蚂蚁基金|账户转移/.test(getCrossTransferText(transaction))
+  );
+}
+
+function isBankTransferCandidate(transaction) {
+  return (
+    getTransactionSourcePlatform(transaction) === "中国银行" &&
+    Number.isFinite(Number(transaction.amount)) &&
+    Number(transaction.amount) > 0 &&
+    transaction.date instanceof Date &&
+    !Number.isNaN(transaction.date.getTime()) &&
+    /支付宝|蚂蚁|蚂蚁基金|余额宝|网上快捷支付|银企对接/.test(getCrossTransferText(transaction))
+  );
+}
+
+function getCrossTransferText(transaction) {
+  return `${transaction?.merchant || ""} ${transaction?.description || ""} ${transaction?.transactionType || ""} ${transaction?.platform || ""} ${transaction?.rawType || ""} ${transaction?.["交易名称"] || ""} ${transaction?.["附言"] || ""} ${transaction?.["对方账户名"] || ""} ${transaction?.["商品说明"] || ""} ${transaction?.["交易说明"] || ""}`;
+}
+
+function isCrossDedupDirectionCompatible(bankTransaction, paymentTransaction) {
+  const bankType = getCrossDedupSemanticType(bankTransaction);
+  const paymentType = getCrossDedupSemanticType(paymentTransaction);
+  if (bankType === paymentType) return true;
+  return bankType === "退款" && paymentType === "退款";
+}
+
+function getCrossDedupSemanticType(transaction) {
+  if (transaction?.type === "退款") return "退款";
+  const text = `${transaction?.merchant || ""} ${transaction?.description || ""} ${transaction?.transactionType || ""} ${transaction?.rawType || ""}`;
+  if (transaction?.type === "收入" && /退款|快捷退款|网上快捷退款|退回|原路退回|冲正|撤销/.test(text)) return "退款";
+  return transaction?.type || "";
+}
+
+function getCrossDedupExcludedCategory(bankTransaction, paymentTransaction) {
+  const semanticType = getCrossDedupSemanticType(bankTransaction) || getCrossDedupSemanticType(paymentTransaction);
+  if (semanticType === "支出") return "重复扣款";
+  if (semanticType === "收入" || semanticType === "退款") return "重复退款";
+  return "重复记录";
 }
 
 function getCrossDedupTextSimilarity(bankTransaction, paymentTransaction) {

@@ -201,16 +201,39 @@ function parseBankOfChinaLine(line, fileName = "") {
   const type = detectBankTransactionType(source, amountInfo);
   const description = bocTableInfo?.description || cleanBankDescription(source, dateMatch[0], amountInfo.raw);
   const merchant = bocTableInfo?.merchant || extractBankCounterparty(source, description);
-
-  return {
-    "交易时间": normalizeBankDateTime(dateMatch[0]),
+  const transactionName = bocTableInfo?.transactionName || inferBankTransactionName(source, type);
+  const normalizedTime = normalizeBankDateTime(dateMatch[0]);
+  const row = {
+    "交易时间": normalizedTime,
     "交易对方": merchant,
     "交易说明": description || merchant,
-    "交易类型": bocTableInfo?.transactionName || inferBankTransactionName(source, type),
     "收/支": type,
+    "交易类型": transactionName,
     "金额": amountInfo.amount.toFixed(2),
     "平台": "中国银行",
+    rawAmountText: amountInfo.raw,
+    signedValue: amountInfo.signedValue,
+    __bocDetectedType: type,
   };
+
+  if (isBankOfChinaDebugTarget(row)) {
+    console.log("[BOC Row Debug]", {
+      date: normalizedTime.slice(0, 10),
+      time: normalizedTime.slice(11),
+      rawAmountText: amountInfo.raw,
+      signedValue: amountInfo.signedValue,
+      transactionName,
+      detectedType: type,
+      finalType: row["收/支"],
+      amount: amountInfo.amount,
+    });
+  }
+
+  return row;
+}
+
+function isBankOfChinaDebugTarget(row) {
+  return Math.abs(Number(row?.signedValue || 0)) === 3000 || /王伟/.test(Object.values(row || {}).join(" "));
 }
 
 function extractBankOfChinaTableInfo(line) {
@@ -331,13 +354,9 @@ function isLikelyDateNumber(line, amountToken) {
 }
 
 function detectBankTransactionType(line, amountInfo) {
-  if (/网上快捷退款|退款|退货|退回|冲回|冲正/.test(line)) return "退款";
-  if (/网上快捷提现|余额宝提现|本人|本户|本账户|本人账户|账户互转|账户转移|互转|还款|信用卡还款|理财|基金|申购|赎回|定投|余额转存|定期|账户调整|结息调整/.test(line)) return "排除";
-  if (/收入金额|贷方|入账|转入|工资|薪资|利息|结息|收款|存入|来账/.test(line)) return "收入";
-  if (/支出金额|借方|出账|消费|支付|转出|手续费|取现|扣款|缴费|付款/.test(line)) return "支出";
   if (amountInfo.signedValue < 0) return "支出";
   if (amountInfo.signedValue > 0) return "收入";
-  return "支出";
+  return "排除";
 }
 
 function normalizeBankDateTime(value) {

@@ -2,7 +2,7 @@
 const EXPENSE_CATEGORIES = ["交通", "学习", "正餐", "奶茶咖啡", "零食水果", "聚餐", "运动", "购物", "娱乐", "手工爱好", "宠物", "旅行", "日常开销", "化妆护肤", "群收款", "其他"];
 const INCOME_CATEGORIES = ["生活费", "兼职", "工资", "群收款", "理财", "收益", "礼金", "其他"];
 const REFUND_CATEGORIES = ["退款/抵扣"];
-const EXCLUDED_CATEGORIES = ["排除", "重复扣款"];
+const EXCLUDED_CATEGORIES = ["排除", "重复扣款", "重复退款", "重复记录", "账户转移", "已合并", "抵消"];
 
 const EXPENSE_CATEGORY_KEYWORDS = [
   ["交通", ["地铁", "公交", "高德打车", "滴滴", "铁路", "12306", "机票", "打车", "停车", "出租车", "网约车"]],
@@ -89,6 +89,10 @@ let currentTableTransactions = [];
 let currentTablePage = 1;
 let isRestoringTablePage = true;
 const expandedDuplicateGroups = new Set();
+const expandedRefundOffsetGroups = new Set();
+const expandedMergeGroups = new Set();
+const selectedTransactionIds = new Set();
+let pendingMergeItems = [];
 
 const billUploader = document.getElementById("billUploader");
 const monthlyBillsUploader = document.getElementById("monthlyBillsUploader");
@@ -109,6 +113,9 @@ const headerFilterMenu = document.getElementById("headerFilterMenu");
 const headerFilterOptions = document.getElementById("headerFilterOptions");
 const headerFilterButtons = Array.from(document.querySelectorAll(".th-filter"));
 const manageCategoriesButton = document.getElementById("manageCategories");
+const startManualMergeButton = document.getElementById("startManualMerge");
+const confirmManualMergeButton = document.getElementById("confirmManualMerge");
+const cancelManualMergeButton = document.getElementById("cancelManualMerge");
 const categoryModal = document.getElementById("categoryModal");
 const closeCategoryModalButton = document.getElementById("closeCategoryModal");
 const cancelCategoryModalButton = document.getElementById("cancelCategoryModal");
@@ -116,6 +123,25 @@ const addCategoryButton = document.getElementById("addCategory");
 const customCategoryType = document.getElementById("customCategoryType");
 const customCategoryName = document.getElementById("customCategoryName");
 const categoryMessage = document.getElementById("categoryMessage");
+const mergeModal = document.getElementById("mergeModal");
+const closeMergeModalButton = document.getElementById("closeMergeModal");
+const cancelMergeModalButton = document.getElementById("cancelMergeModal");
+const createManualMergeButton = document.getElementById("createManualMerge");
+const mergePreview = document.getElementById("mergePreview");
+const mergeTimeInput = document.getElementById("mergeTime");
+const mergeSourcePlatformInput = document.getElementById("mergeSourcePlatform");
+const mergePlatformInput = document.getElementById("mergePlatform");
+const mergeMerchantInput = document.getElementById("mergeMerchant");
+const mergeMerchantOptions = document.getElementById("mergeMerchantOptions");
+const mergeDescriptionInput = document.getElementById("mergeDescription");
+const mergeDescriptionOptions = document.getElementById("mergeDescriptionOptions");
+const mergeCategorySelect = document.getElementById("mergeCategory");
+const mergeTypeSelect = document.getElementById("mergeType");
+const mergeAmountInput = document.getElementById("mergeAmount");
+const mergeAmountBreakdown = document.getElementById("mergeAmountBreakdown");
+const mergeMemoInput = document.getElementById("mergeMemo");
+const mergeMessage = document.getElementById("mergeMessage");
+let lastAutoMergeAmount = "";
 const loadingOverlay = document.getElementById("loadingOverlay");
 const monthlyBudgetInput = document.getElementById("monthlyBudgetInput");
 const saveBudgetButton = document.getElementById("saveBudget");
@@ -169,6 +195,7 @@ const loginTabs = Array.from(document.querySelectorAll(".login-tab"));
 
 document.addEventListener("DOMContentLoaded", () => {
   try {
+    ensureTransactionTableSelectionHeader();
     const loginState = getLoginState();
     currentTablePage = loadSavedTablePage();
     loadMonthlyBudgets();
@@ -198,6 +225,9 @@ exportExcelButton.addEventListener("click", exportTransactionsToExcel);
 exportPdfButton.addEventListener("click", exportReportToPdf);
 transactionTable.addEventListener("change", handleTransactionEdit);
 transactionTable.addEventListener("click", handleTransactionTableClick);
+transactionTable.addEventListener("focusin", handleDescriptionEditFocus);
+transactionTable.addEventListener("focusout", handleDescriptionEditBlur);
+transactionTable.addEventListener("keydown", handleDescriptionEditKeydown);
 tableSearch.addEventListener("input", handleSearchInput);
 tablePagination?.addEventListener("click", handleTablePaginationClick);
 headerFilterButtons.forEach((button) => {
@@ -209,6 +239,12 @@ manageCategoriesButton.addEventListener("click", openCategoryModal);
 closeCategoryModalButton.addEventListener("click", closeCategoryModal);
 cancelCategoryModalButton.addEventListener("click", closeCategoryModal);
 addCategoryButton.addEventListener("click", addCustomCategory);
+startManualMergeButton?.addEventListener("click", openManualMergeModal);
+confirmManualMergeButton?.addEventListener("click", splitSelectedMergedBill);
+closeMergeModalButton?.addEventListener("click", closeManualMergeModal);
+cancelMergeModalButton?.addEventListener("click", closeManualMergeModal);
+createManualMergeButton?.addEventListener("click", createManualMergeTransaction);
+mergeTypeSelect?.addEventListener("change", handleMergeTypeChange);
 saveBudgetButton?.addEventListener("click", saveCurrentMonthBudget);
 clearBudgetButton?.addEventListener("click", clearCurrentMonthBudget);
 monthlyBudgetInput?.addEventListener("keydown", (event) => {
@@ -446,6 +482,7 @@ async function processFiles(files) {
     });
     const dedupedTransactions = applyCrossPlatformDedup(normalizedTransactions);
     const transactions = applyRefundPairing(dedupedTransactions);
+    clearTransactionSelection();
     allTransactions = transactions;
     resetTablePage();
     populateMonthFilter(transactions);
@@ -760,6 +797,7 @@ function applyLoadedMonthlyTransactions(month, transactions, statusText) {
   }
 
   allTransactions = ensureTransactionIds(transactions);
+  clearTransactionSelection();
   resetTablePage();
   populateMonthFilter(allTransactions);
   const monthFilter = document.getElementById("monthFilter");
@@ -1015,7 +1053,7 @@ function isValidCustomCategory(name) {
 
 function migrateStoredTransaction(item) {
   const type = item.type === "中性" ? "排除" : item.type;
-  const sourcePlatform = getTransactionSourcePlatform(item);
+  const sourcePlatform = item.sourcePlatform === "合并账单" ? "合并账单" : getTransactionSourcePlatform(item);
   const categoryParts = {
     description: item.description || "",
     merchant: item.merchant || "",
@@ -1045,6 +1083,7 @@ function restoreDashboardFromStorage() {
   if (!restored.length) return;
 
   allTransactions = restored;
+  clearTransactionSelection();
   populateMonthFilter(allTransactions);
   renderSelectedMonth(document.getElementById("monthFilter").value);
   markSaved(`已从本地恢复 ${allTransactions.length} 笔交易。`);
@@ -1054,6 +1093,7 @@ function clearStoredTransactions() {
   localStorage.removeItem(STORAGE_KEY);
   allTransactions = [];
   pendingFiles = [];
+  clearTransactionSelection();
   resetTablePage();
   billUploader.value = "";
   uploadConfirm.classList.add("hidden");
@@ -1492,7 +1532,8 @@ function normalizeRow(row) {
   const fields = mapFields(row);
   const amount = parseAmount(fields.amount, row);
   const date = parseDate(fields.time);
-  let type = normalizeAlipayTransactionTypeText(fields.type, row) || detectType(fields.type, amount, row);
+  const wechatTypeResult = row.__wechatTypeResult || {};
+  let type = wechatTypeResult.type || normalizeAlipayTransactionTypeText(fields.type, row) || detectType(fields.type, amount, row);
   const absAmount = Math.abs(amount);
   const merchant = fields.merchant || fields.description || "未知交易对象";
   const description = fields.description || merchant;
@@ -1536,9 +1577,21 @@ function normalizeRow(row) {
     excludeReason: row.excludeReason || (type === "排除" ? row.excludeReason || "排除" : ""),
     rawType,
     originalType: row.originalType || rawType,
+    needsReview: Boolean(row.needsReview),
   };
 
-  return applyAlipayClassificationRules(result, row);
+  const finalResult = applyAlipayClassificationRules(result, row);
+  if (isBankOfChinaFinalDebugTarget(finalResult)) {
+    console.log("[BOC Final Tx Debug]", finalResult);
+  }
+  return finalResult;
+}
+
+function isBankOfChinaFinalDebugTarget(transaction) {
+  return (
+    transaction?.sourcePlatform === "中国银行" &&
+    (Math.abs(Number(transaction.amount || 0)) === 3000 || /王伟/.test(`${transaction.merchant || ""} ${transaction.description || ""}`))
+  );
 }
 
 function getNormalizeDropReason(row) {
@@ -1565,7 +1618,7 @@ function findCrossPlatformDuplicateCandidates(transactions) {
 function mapFields(row) {
   return Object.fromEntries(
     Object.entries(FIELD_ALIASES).map(([key, aliases]) => {
-      const header = Object.keys(row).find((name) => aliases.some((alias) => sameHeader(name, alias)));
+      const header = aliases.map((alias) => Object.keys(row).find((name) => sameHeader(name, alias))).find(Boolean);
       return [key, header ? cleanCell(row[header]) : ""];
     })
   );
@@ -1693,6 +1746,7 @@ function mergeUnique(base, extra = []) {
 }
 
 function normalizeCategoryForType(type, category, input = "") {
+  if (["待确认", "已合并"].includes(category)) return category;
   const options = getCategoryOptions(type);
   if (options.includes(category)) return category;
   return inferCategory(type, input);
@@ -1834,7 +1888,7 @@ function buildDuplicateGroupMap(transactions) {
   return transactions.reduce((groups, transaction) => {
     if (!transaction.duplicateGroupKey) return groups;
     const group = groups.get(transaction.duplicateGroupKey) || { primaryTime: null };
-    if (transaction.duplicatePairRole === "primaryPayment") {
+    if (["primaryPayment", "primaryPlatformRecord", "primaryTransfer"].includes(transaction.duplicatePairRole)) {
       group.primaryTime = getTransactionTimeValue(transaction);
     }
     groups.set(transaction.duplicateGroupKey, group);
@@ -1899,8 +1953,8 @@ function getDisplayPairRoleOrder(transaction, groupType) {
 }
 
 function getDuplicatePairRoleOrder(transaction) {
-  if (transaction.duplicatePairRole === "primaryPayment") return 0;
-  if (transaction.duplicatePairRole === "bankDuplicate") return 1;
+  if (["primaryPayment", "primaryPlatformRecord", "primaryTransfer"].includes(transaction.duplicatePairRole)) return 0;
+  if (["bankDuplicate", "bankTransferDuplicate"].includes(transaction.duplicatePairRole)) return 1;
   return 2;
 }
 
@@ -2034,72 +2088,178 @@ function renderSummary(stats) {
 }
 
 function renderTable(rows, total, filteredCount = rows.length, totalPages = 0) {
+  ensureTransactionTableSelectionHeader();
   const tbody = document.getElementById("transactionTable");
   const hint = document.getElementById("tableHint");
   const displayPage = filteredCount ? currentTablePage : 0;
   hint.textContent = `共 ${filteredCount} 条明细，当前显示第 ${displayPage} / ${totalPages} 页`;
+  updateTransactionSelectionControls();
 
   if (!rows.length) {
-    tbody.innerHTML = `<tr><td colspan="8" class="empty-row">${total ? "没有符合条件的明细" : "还没有账单数据，上传账单后将在这里显示整理后的明细。"}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="9" class="empty-row">${total ? "没有符合条件的明细" : "还没有账单数据，上传账单后将在这里显示整理后的明细。"}</td></tr>`;
     return;
   }
 
   const displayRows = buildTableDisplayRows(rows);
   tbody.innerHTML = displayRows
     .map(
-      (entry) => (entry.kind === "duplicateExpanded" ? renderDuplicateExpandedRow(entry.item) : renderTransactionTableRow(entry.item, entry.children))
+      (entry) => {
+        if (entry.kind === "duplicateExpanded") return renderDuplicateExpandedRow(entry.item);
+        if (entry.kind === "refundOffsetParent") return renderRefundOffsetParentRow(entry.item, entry.children);
+        if (entry.kind === "refundOffsetExpanded") return renderRefundOffsetExpandedRow(entry.item);
+        if (entry.kind === "mergeExpanded") return renderMergeExpandedRow(entry.item);
+        return renderTransactionTableRow(entry.item, entry.duplicateChildren, entry.mergeChildren);
+      }
     )
     .join("");
 }
 
 function buildTableDisplayRows(rows) {
   if (isDuplicateOnlyFilterActive()) {
-    return rows.map((item) => ({ kind: "transaction", item, children: [] }));
+    return rows.map((item) => ({ kind: "transaction", item, duplicateChildren: [], mergeChildren: [] }));
   }
 
   const duplicatesByGroup = rows.reduce((groups, item) => {
-    if (item.duplicatePairRole !== "bankDuplicate" || !item.duplicateGroupKey) return groups;
+    if (!["bankDuplicate", "bankTransferDuplicate"].includes(item.duplicatePairRole) || !item.duplicateGroupKey) return groups;
     const children = groups.get(item.duplicateGroupKey) || [];
     children.push(item);
     groups.set(item.duplicateGroupKey, children);
     return groups;
   }, new Map());
+  const mergeChildrenByGroup = rows.reduce((groups, item) => {
+    if (item.mergePairRole !== "mergedChild" || !item.mergeGroupKey) return groups;
+    const children = groups.get(item.mergeGroupKey) || [];
+    children.push(item);
+    groups.set(item.mergeGroupKey, children);
+    return groups;
+  }, new Map());
+  const refundOffsetChildrenByGroup = rows.reduce((groups, item) => {
+    if (!isFullRefundOffsetDisplayItem(item)) return groups;
+    const children = groups.get(item.refundGroupKey) || [];
+    children.push(item);
+    groups.set(item.refundGroupKey, children);
+    return groups;
+  }, new Map());
+  refundOffsetChildrenByGroup.forEach((children) => {
+    children.sort((a, b) => getRefundPairRoleOrder(a) - getRefundPairRoleOrder(b) || getTransactionTimeValue(a) - getTransactionTimeValue(b));
+  });
 
   return rows.flatMap((item) => {
-    if (item.duplicatePairRole === "bankDuplicate" && item.duplicateGroupKey) return [];
-    const children = item.duplicatePairRole === "primaryPayment" ? duplicatesByGroup.get(item.duplicateGroupKey) || [] : [];
-    const expandedChildren = expandedDuplicateGroups.has(item.duplicateGroupKey) ? children.map((child) => ({ kind: "duplicateExpanded", item: child })) : [];
-    return [{ kind: "transaction", item, children }, ...expandedChildren];
+    if (["bankDuplicate", "bankTransferDuplicate"].includes(item.duplicatePairRole) && item.duplicateGroupKey) return [];
+    if (isFullRefundOffsetDisplayItem(item)) {
+      if (item.refundPairRole !== "originalExpense") return [];
+      const children = refundOffsetChildrenByGroup.get(item.refundGroupKey) || [];
+      const parent = createRefundOffsetDisplayParent(item, children);
+      const expandedChildren = expandedRefundOffsetGroups.has(item.refundGroupKey)
+        ? children.map((child) => ({ kind: "refundOffsetExpanded", item: child }))
+        : [];
+      return [{ kind: "refundOffsetParent", item: parent, children }, ...expandedChildren];
+    }
+    if (item.mergePairRole === "mergedChild" && item.mergeGroupKey) return [];
+    const duplicateChildren = ["primaryPayment", "primaryPlatformRecord", "primaryTransfer"].includes(item.duplicatePairRole) ? duplicatesByGroup.get(item.duplicateGroupKey) || [] : [];
+    const mergeChildren = item.isMergedParent ? mergeChildrenByGroup.get(item.mergeGroupKey) || [] : [];
+    const expandedDuplicateChildren = expandedDuplicateGroups.has(item.duplicateGroupKey)
+      ? duplicateChildren.map((child) => ({ kind: "duplicateExpanded", item: child }))
+      : [];
+    const expandedMergeChildren = expandedMergeGroups.has(item.mergeGroupKey) ? mergeChildren.map((child) => ({ kind: "mergeExpanded", item: child })) : [];
+    return [{ kind: "transaction", item, duplicateChildren, mergeChildren }, ...expandedDuplicateChildren, ...expandedMergeChildren];
   });
+}
+
+function isFullRefundOffsetDisplayItem(item) {
+  return Boolean(
+    item?.refundGroupKey &&
+      item.type === "排除" &&
+      item.category === "抵消" &&
+      item.originalTypeBeforeRefundOffset &&
+      ["originalExpense", "refund"].includes(item.refundPairRole)
+  );
+}
+
+function createRefundOffsetDisplayParent(originalExpense, children) {
+  return {
+    id: `refund-offset-parent-${originalExpense.refundGroupKey}`,
+    editDescriptionTargetId: originalExpense.id,
+    date: originalExpense.date,
+    time: originalExpense.time,
+    sourcePlatform: originalExpense.sourcePlatform || getDisplaySourcePlatform(originalExpense),
+    platform: originalExpense.platform || "-",
+    merchant: originalExpense.merchant || "-",
+    description: getTransactionDescriptionSummary(originalExpense),
+    transactionType: originalExpense.transactionType || "-",
+    type: "排除",
+    category: "抵消",
+    amount: 0,
+    refundGroupKey: originalExpense.refundGroupKey,
+    refundOffsetChildrenCount: children.length,
+    isRefundOffsetParent: true,
+  };
 }
 
 function isDuplicateOnlyFilterActive() {
   return tableFilters.type === "排除" || tableFilters.category === "重复扣款";
 }
 
-function renderTransactionTableRow(item, duplicateChildren = []) {
+function renderTransactionTableRow(item, duplicateChildren = [], mergeChildren = []) {
   const displayTime = formatTableTime(item.time);
-  const transactionType = item.transactionType || "-";
   const duplicateToggle = duplicateChildren.length ? renderDuplicateToggle(item.duplicateGroupKey) : "";
+  const mergeToggle = mergeChildren.length ? renderMergeToggle(item.mergeGroupKey) : "";
+  const mergeSelectControl = renderMergeSelectControl(item);
+  const rowClasses = [
+    "selectable-row",
+    selectedTransactionIds.has(item.id) ? "is-merge-selected" : "",
+    item.isMergedParent ? "merged-parent-row" : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
 
   return `
-    <tr data-id="${escapeHtml(item.id)}">
+    <tr class="${escapeHtml(rowClasses)}" data-id="${escapeHtml(item.id)}">
       <td data-label="时间" class="time-cell">
-        <div class="time-date">${escapeHtml(displayTime.date)}</div>
-        ${displayTime.clock ? `<div class="time-clock">${escapeHtml(displayTime.clock)}</div>` : ""}
+        ${renderTransactionTime(displayTime)}
         ${duplicateToggle}
+        ${mergeToggle}
       </td>
-      <td data-label="账单来源" class="source-cell">${escapeHtml(getTransactionSourcePlatform(item))}</td>
+      <td data-label="账单来源" class="source-cell">${escapeHtml(getDisplaySourcePlatform(item))}</td>
       <td data-label="收/付款方式" class="payment-cell">${escapeHtml(item.platform || "-")}</td>
       <td data-label="交易对方" class="merchant-cell">${escapeHtml(item.merchant || "-")}</td>
       <td data-label="交易说明" class="description-cell">
-        <div class="description-main">${escapeHtml(getTransactionDescriptionSummary(item))}</div>
-        ${transactionType !== "-" ? `<div class="description-sub">${escapeHtml(transactionType)}</div>` : ""}
+        ${renderEditableDescription(item)}
       </td>
       <td data-label="类别">${renderCategorySelect(item)}</td>
       <td data-label="收支类型">${renderTypeSelect(item)}</td>
       <td data-label="金额" class="amount-cell ${getAmountClass(item.type)}">${formatDisplayAmount(item)}</td>
+      <td data-label="选择" class="select-cell">${mergeSelectControl}</td>
     </tr>
+  `;
+}
+
+function ensureTransactionTableSelectionHeader() {
+  const headerRow = transactionTable?.closest("table")?.querySelector("thead tr");
+  if (!headerRow || headerRow.querySelector("th.selection-header")) return;
+  const selectionHeader = document.createElement("th");
+  selectionHeader.className = "selection-header";
+  selectionHeader.textContent = "选择";
+  headerRow.appendChild(selectionHeader);
+}
+
+function renderEditableDescription(item) {
+  const value = getTransactionDescriptionSummary(item);
+  const editTargetId = item.editDescriptionTargetId || item.id || "";
+  return `
+    <div class="description-main editable-description"
+      contenteditable="true"
+      data-edit-description-id="${escapeHtml(editTargetId)}"
+      data-original-value="${escapeHtml(value || "-")}">${escapeHtml(value || "-")}</div>
+  `;
+}
+
+function renderTransactionTime(displayTime) {
+  return `
+    <div class="transaction-time">
+      <span class="time-date">${escapeHtml(displayTime.date)}</span>
+      ${displayTime.clock ? `<span class="time-clock">${escapeHtml(displayTime.clock)}</span>` : ""}
+    </div>
   `;
 }
 
@@ -2112,31 +2272,180 @@ function renderDuplicateToggle(groupKey) {
   `;
 }
 
+function renderRefundOffsetToggle(groupKey) {
+  const isExpanded = expandedRefundOffsetGroups.has(groupKey);
+  return `
+    <button class="duplicate-toggle time-duplicate-toggle" type="button" data-refund-offset-group="${escapeHtml(groupKey || "")}" title="展开抵消明细">
+      ${isExpanded ? "▾" : "▸"}
+    </button>
+  `;
+}
+
+function renderMergeToggle(groupKey) {
+  const isExpanded = expandedMergeGroups.has(groupKey);
+  return `
+    <button class="merge-toggle time-merge-toggle" type="button" data-merge-group="${escapeHtml(groupKey || "")}" title="展开合并明细">
+      ${isExpanded ? "▾" : "▸"}
+    </button>
+  `;
+}
+
+function renderMergeSelectControl(item) {
+  if (!isSelectableForSelection(item)) return "";
+  const selected = selectedTransactionIds.has(item.id);
+  return `
+    <button class="merge-select merge-select-control ${selected ? "is-selected" : ""}" type="button" data-transaction-select-id="${escapeHtml(item.id)}" aria-label="${selected ? "取消选择" : "选择"}这条明细">
+      ${selected ? "✓" : ""}
+    </button>
+  `;
+}
+
+function isSelectableForSelection(item) {
+  return Boolean(item?.id && item.mergePairRole !== "mergedChild");
+}
+
+function isSelectableForManualMerge(item) {
+  return Boolean(item?.id && !item.isMergedParent && item.mergePairRole !== "mergedChild");
+}
+
 function renderDuplicateExpandedRow(item) {
   const displayTime = formatTableTime(item.time);
-  const transactionType = item.transactionType || "-";
 
   return `
     <tr class="duplicate-expanded-row" data-id="${escapeHtml(item.id)}" data-duplicate-group="${escapeHtml(item.duplicateGroupKey || "")}">
       <td data-label="时间" class="time-cell">
-        <div class="time-date">${escapeHtml(displayTime.date)}</div>
-        ${displayTime.clock ? `<div class="time-clock">${escapeHtml(displayTime.clock)}</div>` : ""}
+        ${renderTransactionTime(displayTime)}
       </td>
-      <td data-label="账单来源" class="source-cell">${escapeHtml(getTransactionSourcePlatform(item))}</td>
+      <td data-label="账单来源" class="source-cell">${escapeHtml(getDisplaySourcePlatform(item))}</td>
       <td data-label="收/付款方式" class="payment-cell">${escapeHtml(item.platform || "-")}</td>
       <td data-label="交易对方" class="merchant-cell">${escapeHtml(item.merchant || "-")}</td>
       <td data-label="交易说明" class="description-cell">
-        <div class="description-main">${escapeHtml(getTransactionDescriptionSummary(item))}</div>
-        ${transactionType !== "-" ? `<div class="description-sub">${escapeHtml(transactionType)}</div>` : ""}
+        ${renderEditableDescription(item)}
       </td>
       <td data-label="类别">${renderCategorySelect(item)}</td>
       <td data-label="收支类型">${renderTypeSelect(item)}</td>
       <td data-label="金额" class="amount-cell ${getAmountClass(item.type)}">${formatDisplayAmount(item)}</td>
+      <td data-label="选择" class="select-cell"></td>
+    </tr>
+  `;
+}
+
+function renderStaticTableValue(value, extraClass = "") {
+  return `<span class="table-static-value ${extraClass}">${escapeHtml(value || "-")}</span>`;
+}
+
+function renderRefundOffsetParentRow(item, children = []) {
+  const displayTime = formatTableTime(item.time);
+  const toggle = children.length ? renderRefundOffsetToggle(item.refundGroupKey) : "";
+
+  return `
+    <tr class="selectable-row refund-offset-parent-row" data-id="${escapeHtml(item.id || "")}" data-refund-offset-group="${escapeHtml(item.refundGroupKey || "")}">
+      <td data-label="时间" class="time-cell">
+        ${renderTransactionTime(displayTime)}
+        ${toggle}
+      </td>
+      <td data-label="账单来源" class="source-cell">${escapeHtml(item.sourcePlatform || "-")}</td>
+      <td data-label="收/付款方式" class="payment-cell">${escapeHtml(item.platform || "-")}</td>
+      <td data-label="交易对方" class="merchant-cell">${escapeHtml(item.merchant || "-")}</td>
+      <td data-label="交易说明" class="description-cell">
+        ${renderEditableDescription(item)}
+      </td>
+      <td data-label="类别">${renderCategorySelect(item)}</td>
+      <td data-label="收支类型">${renderTypeSelect(item)}</td>
+      <td data-label="金额" class="amount-cell excluded">${formatDisplayAmount(item)}</td>
+      <td data-label="选择" class="select-cell">${renderMergeSelectControl(item)}</td>
+    </tr>
+  `;
+}
+
+function renderRefundOffsetExpandedRow(item) {
+  const displayItem = {
+    ...item,
+    type: item.originalTypeBeforeRefundOffset || item.type,
+    category: item.originalCategoryBeforeRefundOffset || item.category,
+  };
+  const displayTime = formatTableTime(displayItem.time);
+
+  return `
+    <tr class="duplicate-expanded-row refund-offset-expanded-row" data-id="${escapeHtml(item.id || "")}" data-refund-offset-group="${escapeHtml(item.refundGroupKey || "")}">
+      <td data-label="时间" class="time-cell">
+        ${renderTransactionTime(displayTime)}
+      </td>
+      <td data-label="账单来源" class="source-cell">${escapeHtml(getDisplaySourcePlatform(displayItem))}</td>
+      <td data-label="收/付款方式" class="payment-cell">${escapeHtml(displayItem.platform || "-")}</td>
+      <td data-label="交易对方" class="merchant-cell">${escapeHtml(displayItem.merchant || "-")}</td>
+      <td data-label="交易说明" class="description-cell">
+        ${renderEditableDescription(displayItem)}
+      </td>
+      <td data-label="类别">${renderCategorySelect(displayItem)}</td>
+      <td data-label="收支类型">${renderTypeSelect(displayItem)}</td>
+      <td data-label="金额" class="amount-cell ${getAmountClass(displayItem.type)}">${formatDisplayAmount(displayItem)}</td>
+      <td data-label="选择" class="select-cell"></td>
+    </tr>
+  `;
+}
+
+function renderMergeExpandedRow(item) {
+  const displayTime = formatTableTime(item.time);
+
+  return `
+    <tr class="merge-expanded-row" data-id="${escapeHtml(item.id)}" data-merge-group="${escapeHtml(item.mergeGroupKey || "")}">
+      <td data-label="时间" class="time-cell">
+        ${renderTransactionTime(displayTime)}
+      </td>
+      <td data-label="账单来源" class="source-cell">${escapeHtml(getDisplaySourcePlatform(item))}</td>
+      <td data-label="收/付款方式" class="payment-cell">${escapeHtml(item.platform || "-")}</td>
+      <td data-label="交易对方" class="merchant-cell">${escapeHtml(item.merchant || "-")}</td>
+      <td data-label="交易说明" class="description-cell">
+        ${renderEditableDescription(item)}
+      </td>
+      <td data-label="类别">${renderCategorySelect(item)}</td>
+      <td data-label="收支类型">${renderTypeSelect(item)}</td>
+      <td data-label="金额" class="amount-cell ${getAmountClass(item.type)}">${formatDisplayAmount(item)}</td>
+      <td data-label="选择" class="select-cell"></td>
     </tr>
   `;
 }
 
 function handleTransactionTableClick(event) {
+  const mergeSelect = event.target.closest(".merge-select");
+  if (mergeSelect) {
+    event.preventDefault();
+    event.stopPropagation();
+    toggleTransactionSelection(mergeSelect.dataset.transactionSelectId || "");
+    return;
+  }
+
+  const mergeToggle = event.target.closest(".merge-toggle");
+  if (mergeToggle) {
+    event.preventDefault();
+    event.stopPropagation();
+    const groupKey = mergeToggle.dataset.mergeGroup || "";
+    if (!groupKey) return;
+    if (expandedMergeGroups.has(groupKey)) {
+      expandedMergeGroups.delete(groupKey);
+    } else {
+      expandedMergeGroups.add(groupKey);
+    }
+    applyTableFilters();
+    return;
+  }
+
+  const refundOffsetToggle = event.target.closest("button[data-refund-offset-group]");
+  if (refundOffsetToggle) {
+    event.preventDefault();
+    event.stopPropagation();
+    const groupKey = refundOffsetToggle.dataset.refundOffsetGroup || "";
+    if (!groupKey) return;
+    if (expandedRefundOffsetGroups.has(groupKey)) {
+      expandedRefundOffsetGroups.delete(groupKey);
+    } else {
+      expandedRefundOffsetGroups.add(groupKey);
+    }
+    applyTableFilters();
+    return;
+  }
+
   const toggle = event.target.closest(".duplicate-toggle");
   if (!toggle) return;
 
@@ -2153,9 +2462,473 @@ function handleTransactionTableClick(event) {
   applyTableFilters();
 }
 
+function updateTransactionSelectionControls() {
+  const selected = getSelectedTransactions();
+  const selectedCount = selected.length;
+  const canMerge = selected.length >= 2 && !selected.some((item) => item.mergePairRole === "mergedChild");
+  const canSplit = selected.length === 1 && selected[0]?.isMergedParent === true;
+  if (cancelManualMergeButton) {
+    cancelManualMergeButton.textContent = `已选 ${selectedCount} 条`;
+  }
+  startManualMergeButton.disabled = !canMerge;
+  confirmManualMergeButton.disabled = !canSplit;
+}
+
+function toggleTransactionSelection(id) {
+  if (!id) return;
+  const transaction = findSelectableTransactionById(id);
+  if (!transaction || !isSelectableForSelection(transaction)) return;
+  if (selectedTransactionIds.has(id)) {
+    selectedTransactionIds.delete(id);
+  } else {
+    selectedTransactionIds.add(id);
+  }
+  updateTransactionSelectionControls();
+  applyTableFilters();
+}
+
+function openManualMergeModal() {
+  const selectedItems = getSelectedTransactions();
+  if (selectedItems.some((item) => item.mergePairRole === "mergedChild")) {
+    setStatus("合并子明细不能再次合并，请先拆分原合并账单。");
+    return;
+  }
+  if (selectedItems.some((item) => item.isMergedParent)) {
+    setStatus("已合并账单不能再次合并，请先拆分原合并账单。");
+    return;
+  }
+
+  pendingMergeItems = selectedItems.filter((item) => isSelectableForManualMerge(item));
+  if (pendingMergeItems.length < 2) {
+    setStatus("请至少选择 2 条明细进行合并");
+    return;
+  }
+
+  const defaults = getManualMergeDefaults(pendingMergeItems);
+  const merchantOptions = getManualMergeMerchantOptions(pendingMergeItems);
+  const descriptionOptions = getManualMergeDescriptionOptions(pendingMergeItems);
+  mergeTimeInput.value = defaults.time;
+  mergeSourcePlatformInput.value = defaults.sourcePlatform;
+  mergePlatformInput.value = defaults.platform;
+  mergeMerchantInput.value = defaults.merchant;
+  renderMergeMerchantOptions(merchantOptions);
+  mergeDescriptionInput.value = defaults.description;
+  renderMergeDescriptionOptions(descriptionOptions);
+  mergeTypeSelect.value = defaults.type;
+  renderMergeCategoryOptions(defaults.type, defaults.category);
+  mergeCategorySelect.value = defaults.category;
+  updateMergeAmountBreakdown(defaults.type, { force: true });
+  mergeMemoInput.value = "";
+  mergeMessage.textContent = defaults.type === "待确认" ? "选中的明细收支类型不一致，请确认收支类型和金额。" : "";
+  mergePreview.innerHTML = `已选择 ${pendingMergeItems.length} 条明细，原始明细会保留并标记为已合并。`;
+  mergeModal.classList.remove("hidden");
+}
+
+function closeManualMergeModal() {
+  mergeModal.classList.add("hidden");
+  pendingMergeItems = [];
+  mergeMessage.textContent = "";
+}
+
+function getSelectedTransactions() {
+  return Array.from(selectedTransactionIds)
+    .map((id) => findSelectableTransactionById(id))
+    .filter(Boolean);
+}
+
+function findSelectableTransactionById(id) {
+  if (!id) return null;
+  return allTransactions.find((item) => item.id === id) || currentTableTransactions.find((item) => item.id === id) || null;
+}
+
+function clearTransactionSelection() {
+  selectedTransactionIds.clear();
+  updateTransactionSelectionControls();
+}
+
+function splitSelectedMergedBill() {
+  const selectedItems = getSelectedTransactions();
+  const mergedParents = selectedItems.filter((item) => item.isMergedParent);
+  const normalItems = selectedItems.filter((item) => !item.isMergedParent);
+
+  if (!mergedParents.length) {
+    setStatus(normalItems.length ? "普通明细不能拆分，只有已合并账单可以拆分。" : "请选择需要拆分的合并账单。");
+    return;
+  }
+  if (mergedParents.length > 1) {
+    setStatus("请一次只拆分一条合并账单。");
+    return;
+  }
+  if (normalItems.length) {
+    setStatus("普通明细不能拆分，只有已合并账单可以拆分。");
+    return;
+  }
+
+  confirmSplitMergedBill(mergedParents[0]);
+}
+
+function confirmSplitMergedBill(parentTransaction) {
+  if (!parentTransaction?.isMergedParent) return;
+  const confirmed = window.confirm("确定要拆分这条合并账单吗？拆分后，合并明细将删除，原始明细会恢复为普通账单。");
+  if (!confirmed) return;
+  splitMergedBill(parentTransaction);
+}
+
+function splitMergedBill(parentTransaction) {
+  if (!parentTransaction?.isMergedParent) return;
+  const groupKey = parentTransaction.mergeGroupKey || "";
+  const children = getMergedChildren(parentTransaction);
+
+  if (!children.length) {
+    console.warn("[Manual Merge Split Warning] No merged children found", parentTransaction);
+  }
+
+  allTransactions = allTransactions
+    .filter((item) => !isSameMergedParent(item, parentTransaction))
+    .map((item) => {
+      if (!children.some((child) => child.id === item.id)) return item;
+      return restoreMergedChild(item);
+    });
+
+  if (groupKey) expandedMergeGroups.delete(groupKey);
+  clearTransactionSelection();
+  resetTablePage();
+  renderSelectedMonth(document.getElementById("monthFilter").value);
+  saveTransactionsToStorage();
+  markUnsaved();
+  setStatus(`已拆分合并账单，恢复 ${children.length} 条原始明细。`);
+}
+
+function getMergedChildren(parentTransaction) {
+  const groupKey = parentTransaction?.mergeGroupKey || "";
+  const childIds = new Set(parentTransaction?.mergedChildrenIds || []);
+  return allTransactions.filter((item) => {
+    if (!item || item.id === parentTransaction.id) return false;
+    const matchesGroup = groupKey && item.mergeGroupKey === groupKey && item.mergePairRole === "mergedChild";
+    const matchesRecordedId = childIds.has(item.id) && item.mergePairRole === "mergedChild";
+    return matchesGroup || matchesRecordedId;
+  });
+}
+
+function isSameMergedParent(item, parentTransaction) {
+  if (!item?.isMergedParent) return false;
+  if (item.id && parentTransaction.id && item.id === parentTransaction.id) return true;
+  return Boolean(parentTransaction.mergeGroupKey && item.mergeGroupKey === parentTransaction.mergeGroupKey);
+}
+
+function restoreMergedChild(child) {
+  const missingOriginalFields = !child.originalTypeBeforeMerge || !child.originalCategoryBeforeMerge;
+  if (missingOriginalFields) {
+    console.warn("[Manual Merge Split Warning] Missing original fields", child);
+  }
+
+  const restored = {
+    ...child,
+    type: child.originalTypeBeforeMerge || "待确认",
+    category: child.originalCategoryBeforeMerge || "其他",
+    excludeReason: child.originalExcludeReasonBeforeMerge || "",
+    needsReview: child.originalNeedsReviewBeforeMerge ?? missingOriginalFields,
+  };
+
+  delete restored.mergePairRole;
+  delete restored.mergeGroupKey;
+  delete restored.originalTypeBeforeMerge;
+  delete restored.originalCategoryBeforeMerge;
+  delete restored.originalExcludeReasonBeforeMerge;
+  delete restored.originalNeedsReviewBeforeMerge;
+  delete restored.originalAmountBeforeMerge;
+  if (restored.excludeReason === "已合并到账单") delete restored.excludeReason;
+
+  return restored;
+}
+
+function getManualMergeDefaults(items) {
+  const latest = items.slice().sort((a, b) => getTransactionTimeValue(b) - getTransactionTimeValue(a))[0];
+  const sourcePlatforms = uniqueNonEmpty(items.map((item) => getDisplaySourcePlatform(item)));
+  const platforms = uniqueNonEmpty(items.map((item) => item.platform));
+  const merchants = getManualMergeMerchantOptions(items);
+  const categories = uniqueNonEmpty(items.map((item) => item.category));
+  const suggestion = calculateMergeAmountSuggestion(items, "");
+  const type = suggestion.defaultType;
+  const category = suggestion.isFullyOffset ? "抵消" : categories.length === 1 ? categories[0] : "待确认";
+
+  return {
+    time: latest?.time || formatDateTime(new Date()),
+    sourcePlatform: sourcePlatforms.length === 1 ? sourcePlatforms[0] : "合并账单",
+    platform: platforms.length === 1 ? platforms[0] : "多方式",
+    merchant: merchants.length === 1 ? merchants[0] : "合并账单",
+    description: `手动合并 ${items.length} 条明细`,
+    category,
+    type,
+    amount: suggestion.suggestedAmount,
+  };
+}
+
+function getManualMergeMerchantOptions(items) {
+  return uniqueNonEmpty(
+    items.map((item) => item.merchant || item.counterparty || item.payee || item.traderName || "")
+  );
+}
+
+function renderMergeMerchantOptions(options) {
+  mergeMerchantOptions.innerHTML = options.map((option) => `<option value="${escapeHtml(option)}"></option>`).join("");
+}
+
+function getManualMergeDescriptionOptions(items) {
+  return uniqueNonEmpty(
+    items.map((item) => item.description || item.remark || item["商品说明"] || item["交易说明"] || getTransactionDescriptionSummary(item) || "")
+  );
+}
+
+function renderMergeDescriptionOptions(options) {
+  mergeDescriptionOptions.innerHTML = options.map((option) => `<option value="${escapeHtml(option)}"></option>`).join("");
+}
+
+function uniqueNonEmpty(values) {
+  return Array.from(new Set(values.map((value) => cleanCell(value || "")).filter(Boolean)));
+}
+
+function getManualMergeAmountForType(items, type) {
+  return calculateMergeAmountSuggestion(items, type).suggestedAmount || 0;
+}
+
+function getManualMergeAmountParts(items, type) {
+  if (type === "支出") return items.filter((item) => item.type === "支出").map((item) => Number(item.amount || 0)).filter((amount) => amount > 0);
+  if (type === "收入") return items.filter((item) => item.type === "收入").map((item) => Number(item.amount || 0)).filter((amount) => amount > 0);
+  if (type === "退款") return items.filter((item) => item.type === "退款").map((item) => Number(item.amount || 0)).filter((amount) => amount > 0);
+  return [];
+}
+
+function handleMergeTypeChange() {
+  const type = mergeTypeSelect.value;
+  const currentCategory = mergeCategorySelect.value || "待确认";
+  const suggestion = calculateMergeAmountSuggestion(pendingMergeItems, type);
+  const nextCategory = suggestion.isFullyOffset && type === "排除" ? "抵消" : currentCategory;
+  renderMergeCategoryOptions(type, nextCategory);
+  mergeCategorySelect.value = nextCategory;
+  updateMergeAmountBreakdown(type);
+}
+
+function updateMergeAmountBreakdown(type, options = {}) {
+  const previousAutoAmount = lastAutoMergeAmount;
+  const suggestion = calculateMergeAmountSuggestion(pendingMergeItems, type);
+  const nextAutoText = suggestion.hasAutoAmount ? String(suggestion.suggestedAmount) : "";
+  mergeAmountBreakdown.innerHTML = renderMergeAmountBreakdown(suggestion);
+
+  const canAutoFill = options.force || !mergeAmountInput.value || mergeAmountInput.value === previousAutoAmount;
+  if (canAutoFill) {
+    mergeAmountInput.value = nextAutoText;
+  }
+  lastAutoMergeAmount = nextAutoText;
+}
+
+function calculateMergeAmountSuggestion(items, selectedType) {
+  const expenseParts = getManualMergeAmountParts(items, "支出");
+  const incomeParts = getManualMergeAmountParts(items, "收入");
+  const refundParts = getManualMergeAmountParts(items, "退款");
+  const expenseTotal = roundMoneyAmount(expenseParts.reduce((sumValue, amount) => sumValue + amount, 0));
+  const incomeTotal = roundMoneyAmount(incomeParts.reduce((sumValue, amount) => sumValue + amount, 0));
+  const refundTotal = roundMoneyAmount(refundParts.reduce((sumValue, amount) => sumValue + amount, 0));
+  const hasExpenses = expenseTotal > 0;
+  const hasIncomes = incomeTotal > 0;
+  const isFullyOffset = hasExpenses && hasIncomes && isMoneyFullyOffset(expenseTotal, incomeTotal);
+  const netExpense = roundMoneyAmount(expenseTotal - incomeTotal);
+  const netIncome = roundMoneyAmount(incomeTotal - expenseTotal);
+  const defaultType = getDefaultMergeType({ hasExpenses, hasIncomes, expenseTotal, incomeTotal, isFullyOffset, refundTotal });
+  const effectiveType = selectedType || defaultType;
+  const formulaLines = [];
+  let suggestedAmount = 0;
+  let hasAutoAmount = false;
+  let warningMessage = "";
+
+  if (isFullyOffset && (!selectedType || selectedType === "排除")) {
+    formulaLines.push(renderMergeAmountLine("支出合计", expenseParts));
+    formulaLines.push(renderMergeAmountLine("收入抵扣", incomeParts));
+    formulaLines.push(renderMergeFormulaLine("净额", expenseTotal, incomeTotal, 0));
+    formulaLines.push('<div class="merge-amount-breakdown-line warning">已完全抵消，将作为“抵消”项保留，不计入收入或支出统计</div>');
+    suggestedAmount = 0;
+    hasAutoAmount = true;
+  } else if (effectiveType === "支出") {
+    formulaLines.push(renderMergeAmountLine("支出合计", expenseParts));
+    if (hasIncomes) {
+      formulaLines.push(renderMergeAmountLine("收入抵扣", incomeParts));
+      if (netExpense > 0) {
+        suggestedAmount = netExpense;
+        hasAutoAmount = true;
+        formulaLines.push(renderMergeFormulaLine("净支出", expenseTotal, incomeTotal, netExpense));
+      } else {
+        warningMessage = "收入合计已大于或等于支出合计，请确认是否应选择“收入”或手动输入金额";
+        formulaLines.push(renderMergeFormulaLine("净支出", expenseTotal, incomeTotal, 0));
+      }
+    } else {
+      suggestedAmount = expenseTotal;
+      hasAutoAmount = expenseTotal > 0;
+    }
+  } else if (effectiveType === "收入") {
+    formulaLines.push(renderMergeAmountLine("收入合计", incomeParts));
+    if (hasExpenses) {
+      formulaLines.push(renderMergeAmountLine("支出抵扣", expenseParts));
+      if (netIncome > 0) {
+        suggestedAmount = netIncome;
+        hasAutoAmount = true;
+        formulaLines.push(renderMergeFormulaLine("净收入", incomeTotal, expenseTotal, netIncome));
+      } else {
+        warningMessage = "当前组合不是净收入，请确认收支类型或手动输入金额";
+        formulaLines.push(renderMergeFormulaLine("净收入", incomeTotal, expenseTotal, 0));
+      }
+    } else {
+      suggestedAmount = incomeTotal;
+      hasAutoAmount = incomeTotal > 0;
+    }
+  } else if (effectiveType === "退款") {
+    formulaLines.push(renderMergeAmountLine("退款合计", refundParts));
+    suggestedAmount = refundTotal;
+    hasAutoAmount = refundTotal > 0;
+  } else {
+    formulaLines.push(renderMergeAmountLine("支出合计", expenseParts));
+    formulaLines.push(renderMergeAmountLine("收入合计", incomeParts));
+    warningMessage = "请选择收支类型，系统将自动计算净额，或手动输入金额";
+  }
+
+  if (warningMessage) {
+    formulaLines.push(`<div class="merge-amount-breakdown-line warning">${escapeHtml(warningMessage)}</div>`);
+  }
+
+  return {
+    expenseTotal,
+    incomeTotal,
+    defaultType,
+    isFullyOffset,
+    suggestedAmount,
+    hasAutoAmount,
+    formulaLines,
+    warningMessage,
+    canAutoFill: hasAutoAmount,
+  };
+}
+
+function isMoneyFullyOffset(expenseTotal, incomeTotal) {
+  return Math.abs(roundMoneyAmount(expenseTotal - incomeTotal)) <= 0.01;
+}
+
+function getDefaultMergeType({ hasExpenses, hasIncomes, expenseTotal, incomeTotal, isFullyOffset, refundTotal }) {
+  if (isFullyOffset) return "排除";
+  if (hasExpenses && hasIncomes) return expenseTotal > incomeTotal ? "支出" : "收入";
+  if (hasExpenses) return "支出";
+  if (hasIncomes) return "收入";
+  if (refundTotal > 0) return "退款";
+  return "待确认";
+}
+
+function renderMergeAmountBreakdown(suggestion) {
+  return suggestion.formulaLines.join("");
+}
+
+function renderMergeAmountLine(label, amounts) {
+  const total = roundMoneyAmount(amounts.reduce((sumValue, amount) => sumValue + amount, 0));
+  const formula = amounts.length > 1
+    ? `${amounts.map((amount) => money.format(amount)).join(" + ")} = ${money.format(total)}`
+    : money.format(total);
+  return `<div class="merge-amount-breakdown-line">${escapeHtml(label)}：${escapeHtml(formula)}</div>`;
+}
+
+function renderMergeFormulaLine(label, minuend, subtrahend, result) {
+  return `<div class="merge-amount-breakdown-line">${escapeHtml(label)}：${escapeHtml(money.format(minuend))} - ${escapeHtml(money.format(subtrahend))} = ${escapeHtml(money.format(result))}</div>`;
+}
+
+function renderMergeCategoryOptions(type, selectedCategory = "待确认") {
+  const normalizedType = TYPE_OPTIONS.includes(type) ? type : "支出";
+  const options = mergeUnique(["待确认"], getCategoryOptions(normalizedType));
+  if (selectedCategory && !options.includes(selectedCategory)) options.unshift(selectedCategory);
+  mergeCategorySelect.innerHTML = options.map((option) => `<option value="${escapeHtml(option)}">${escapeHtml(option)}</option>`).join("");
+}
+
+function createManualMergeTransaction() {
+  if (pendingMergeItems.length < 2) {
+    mergeMessage.textContent = "请至少选择 2 条明细。";
+    return;
+  }
+
+  const parentType = mergeTypeSelect.value;
+  if (!TYPE_OPTIONS.includes(parentType)) {
+    mergeMessage.textContent = "请选择合并后的收支类型。";
+    return;
+  }
+
+  const parentAmount = Number(mergeAmountInput.value);
+  if (!Number.isFinite(parentAmount) || parentAmount < 0) {
+    mergeMessage.textContent = "请输入有效的合并金额。";
+    return;
+  }
+  if (["支出", "收入", "退款"].includes(parentType) && parentAmount <= 0) {
+    mergeMessage.textContent = "支出、收入或退款类型的合并金额必须大于 0。";
+    return;
+  }
+
+  const date = parseDate(mergeTimeInput.value) || new Date();
+  const mergeGroupKey = `manual-merge-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const childIds = pendingMergeItems.map((item) => item.id);
+  const parentTransaction = {
+    id: `${mergeGroupKey}-parent`,
+    date,
+    time: formatDateTime(date),
+    sourcePlatform: cleanCell(mergeSourcePlatformInput.value) || "合并账单",
+    platform: cleanCell(mergePlatformInput.value) || "多方式",
+    paymentMethod: cleanCell(mergePlatformInput.value) || "多方式",
+    merchant: cleanCell(mergeMerchantInput.value) || "合并账单",
+    description: cleanCell(mergeDescriptionInput.value) || `手动合并 ${pendingMergeItems.length} 条明细`,
+    transactionType: "手动合并",
+    type: parentType,
+    amount: roundMoneyAmount(parentAmount),
+    category: mergeCategorySelect.value || "待确认",
+    excludeReason: parentType === "排除" && (mergeCategorySelect.value === "抵消" || roundMoneyAmount(parentAmount) === 0) ? "支出收入完全抵消" : "",
+    memo: cleanCell(mergeMemoInput.value),
+    isMergedParent: true,
+    mergeGroupKey,
+    mergedChildrenIds: childIds,
+  };
+
+  const childIdSet = new Set(childIds);
+  allTransactions = ensureTransactionIds([
+    parentTransaction,
+    ...allTransactions.map((item) => {
+      if (!childIdSet.has(item.id)) return item;
+      return {
+        ...item,
+        mergePairRole: "mergedChild",
+        mergeGroupKey,
+        type: "排除",
+        category: "已合并",
+        excludeReason: "已合并到账单",
+        originalTypeBeforeMerge: item.originalTypeBeforeMerge || item.type,
+        originalCategoryBeforeMerge: item.originalCategoryBeforeMerge || item.category,
+        originalExcludeReasonBeforeMerge: item.originalExcludeReasonBeforeMerge ?? item.excludeReason ?? "",
+        originalNeedsReviewBeforeMerge: item.originalNeedsReviewBeforeMerge ?? Boolean(item.needsReview),
+        originalAmountBeforeMerge: item.originalAmountBeforeMerge ?? item.amount,
+      };
+    }),
+  ]);
+
+  expandedMergeGroups.add(mergeGroupKey);
+  console.log("[Manual Merge Applied]", {
+    mergeGroupKey,
+    selectedCount: childIds.length,
+    parentAmount: parentTransaction.amount,
+    parentType,
+    childCount: childIds.length,
+  });
+
+  closeManualMergeModal();
+  clearTransactionSelection();
+  resetTablePage();
+  renderSelectedMonth(document.getElementById("monthFilter").value);
+  saveTransactionsToStorage();
+  markUnsaved();
+}
+
 function updateFilterOptions() {
   tableFilterOptions = {
-    platform: uniqueSorted(currentTableTransactions.map((item) => getTransactionSourcePlatform(item))),
+    platform: uniqueSorted(currentTableTransactions.map((item) => getDisplaySourcePlatform(item))),
     type: uniqueSorted(TYPE_OPTIONS),
     category: uniqueSorted(getAllCategoriesForFilter()),
     merchant: uniqueSorted(currentTableTransactions.map((item) => item.merchant)),
@@ -2249,7 +3022,7 @@ function getFilteredTransactions() {
       money.format(item.amount),
     ];
     const matchesSearch = !keyword || fields.some((value) => String(value || "").toLowerCase().includes(keyword));
-    const matchesPlatform = !tableFilters.platform || getTransactionSourcePlatform(item) === tableFilters.platform;
+    const matchesPlatform = !tableFilters.platform || getDisplaySourcePlatform(item) === tableFilters.platform;
     const matchesType = !tableFilters.type || item.type === tableFilters.type;
     const matchesCategory = !tableFilters.category || item.category === tableFilters.category;
     const matchesMerchant = !tableFilters.merchant || item.merchant === tableFilters.merchant;
@@ -2261,6 +3034,12 @@ function getFilteredTransactions() {
 
 function getTransactionDescriptionSummary(item) {
   return item?.description || item?.memo || item?.summary || "-";
+}
+
+function getDisplaySourcePlatform(item) {
+  const explicitSource = cleanCell(item?.sourcePlatform || item?.__sourcePlatform || item?.billSource || "");
+  if (explicitSource && !["未知", "未知来源"].includes(explicitSource)) return explicitSource;
+  return getTransactionSourcePlatform(item);
 }
 
 function formatTableTime(value) {
@@ -2414,11 +3193,74 @@ function renderCategorySelect(item) {
     merchant: item.merchant,
     transactionType: item.transactionType,
   });
+  const options = mergeUnique(getCategoryOptions(item.type), [category]);
   return `
     <select class="table-select category-select category-${getCategoryTone(category)}" data-field="category">
-      ${getCategoryOptions(item.type).map((option) => `<option value="${escapeHtml(option)}" ${category === option ? "selected" : ""}>${escapeHtml(option)}</option>`).join("")}
+      ${options.map((option) => `<option value="${escapeHtml(option)}" ${category === option ? "selected" : ""}>${escapeHtml(option)}</option>`).join("")}
     </select>
   `;
+}
+
+function handleDescriptionEditFocus(event) {
+  const target = event.target.closest(".editable-description");
+  if (!target) return;
+  target.dataset.beforeEditValue = target.textContent.trim();
+}
+
+function handleDescriptionEditKeydown(event) {
+  const target = event.target.closest(".editable-description");
+  if (!target) return;
+
+  if (event.key === "Enter") {
+    event.preventDefault();
+    target.blur();
+    return;
+  }
+
+  if (event.key === "Escape") {
+    event.preventDefault();
+    target.dataset.cancelEdit = "true";
+    target.textContent = target.dataset.beforeEditValue || target.dataset.originalValue || "-";
+    target.blur();
+  }
+}
+
+function handleDescriptionEditBlur(event) {
+  const target = event.target.closest(".editable-description");
+  if (!target) return;
+
+  const id = target.dataset.editDescriptionId || "";
+  const nextValue = cleanCell(target.textContent || "");
+  const previousValue = target.dataset.beforeEditValue || target.dataset.originalValue || "";
+
+  if (!id) return;
+  if (target.dataset.cancelEdit === "true") {
+    delete target.dataset.cancelEdit;
+    target.textContent = previousValue || "-";
+    return;
+  }
+  if (!nextValue) {
+    target.textContent = previousValue || "-";
+    return;
+  }
+  if (nextValue === previousValue) return;
+
+  const transaction = allTransactions.find((item) => item.id === id);
+  if (!transaction) return;
+
+  transaction.description = nextValue;
+  target.dataset.originalValue = nextValue;
+  target.dataset.beforeEditValue = nextValue;
+  target.textContent = nextValue;
+
+  const tableTransaction = currentTableTransactions.find((item) => item.id === id);
+  if (tableTransaction && tableTransaction !== transaction) {
+    tableTransaction.description = nextValue;
+  }
+
+  saveTransactionsToStorage();
+  markUnsaved();
+  updateFilterOptions();
 }
 
 function handleTransactionEdit(event) {

@@ -1,4 +1,4 @@
-// Shared parser utilities for SpendScope. Loaded before script.js.
+﻿// Shared parser utilities for SpendScope. Loaded before script.js.
 
 function addBillSourceMeta(row, platformFromFile, sourceFromFile) {
   const unknownSource = "\u672a\u77e5\u6765\u6e90";
