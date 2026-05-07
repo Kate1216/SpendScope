@@ -27,17 +27,34 @@
           <button class="login-tab" type="button" data-login-tab="register">注册</button>
         </div>
         <div class="login-form">
-          <label class="login-field">
-            <span>手机号或邮箱</span>
-            <input id="loginAccount" type="text" autocomplete="username" placeholder="请输入手机号或邮箱" />
-          </label>
-          <label class="login-field">
-            <span>密码</span>
-            <input id="loginPassword" type="password" autocomplete="current-password" placeholder="本地体验模式可不校验" />
-          </label>
+          <div id="loginFormPanel" class="login-form-panel" data-login-panel="login">
+            <label class="login-field">
+              <span>邮箱</span>
+              <input id="loginAccount" type="email" autocomplete="username" placeholder="请输入邮箱" />
+            </label>
+            <label class="login-field">
+              <span>密码</span>
+              <input id="loginPassword" type="password" autocomplete="current-password" placeholder="请输入密码" />
+            </label>
+            <button id="loginButton" class="login-primary-button" type="button">登录</button>
+          </div>
+          <div id="registerFormPanel" class="login-form-panel is-hidden" data-login-panel="register">
+            <label class="login-field">
+              <span>邮箱</span>
+              <input id="registerEmail" type="email" autocomplete="username" placeholder="请输入邮箱" />
+            </label>
+            <label class="login-field">
+              <span>密码</span>
+              <input id="registerPassword" type="password" autocomplete="new-password" placeholder="至少 6 位" />
+            </label>
+            <label class="login-field">
+              <span>确认密码</span>
+              <input id="registerPasswordConfirm" type="password" autocomplete="new-password" placeholder="再次输入密码" />
+            </label>
+            <button id="registerButton" class="login-primary-button" type="button">注册并登录</button>
+            <p class="login-note">当前为本地 Demo 版，邮箱验证码将在后端版本中接入。</p>
+          </div>
           <p id="loginMessage" class="login-message"></p>
-          <button id="loginButton" class="login-primary-button" type="button">登录</button>
-          <button id="guestLoginButton" class="login-secondary-button" type="button">游客体验</button>
           <p class="login-note">当前版本为本地体验模式，账单数据默认保存在浏览器本地。</p>
         </div>
       </div>
@@ -221,7 +238,7 @@
           <span id="tableHint">共 0 条明细，当前显示第 0 / 0 页</span>
         </div>
         <div class="table-tools">
-          <input id="tableSearch" class="table-search" type="search" placeholder="搜索交易对象、交易类型、商品说明、类别或金额" />
+          <input id="tableSearch" class="table-search" type="search" placeholder="搜索账单来源、收/付款方式、交易对方、商品说明、交易类型、类别或金额" />
           <button id="manageCategories" class="action-button" type="button">管理分类</button>
         </div>
         <div class="table-wrap">
@@ -229,9 +246,10 @@
             <thead>
               <tr>
                 <th>时间</th>
-                <th><button class="th-filter" type="button" data-filter="platform">平台 ▾</button></th>
-                <th><button class="th-filter" type="button" data-filter="merchant">交易对象 ▾</button></th>
-                <th><button class="th-filter" type="button" data-filter="transactionType">交易类型 ▾</button></th>
+                <th><button class="th-filter" type="button" data-filter="platform">账单来源 ▾</button></th>
+                <th>收/付款方式</th>
+                <th><button class="th-filter" type="button" data-filter="merchant">交易对方 ▾</button></th>
+                <th>交易说明</th>
                 <th><button class="th-filter" type="button" data-filter="category">类别 ▾</button></th>
                 <th><button class="th-filter" type="button" data-filter="type">收支类型 ▾</button></th>
                 <th>金额</th>
@@ -239,7 +257,7 @@
             </thead>
             <tbody id="transactionTable">
               <tr>
-                <td colspan="7" class="empty-row">还没有账单数据，上传账单后将在这里显示整理后的明细。</td>
+                <td colspan="8" class="empty-row">还没有账单数据，上传账单后将在这里显示整理后的明细。</td>
               </tr>
             </tbody>
           </table>
