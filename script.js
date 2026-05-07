@@ -1,8 +1,8 @@
-const TYPE_OPTIONS = ["支出", "收入", "退款", "排除"];
+﻿const TYPE_OPTIONS = ["支出", "收入", "退款", "排除"];
 const EXPENSE_CATEGORIES = ["交通", "学习", "正餐", "奶茶咖啡", "零食水果", "聚餐", "运动", "购物", "娱乐", "手工爱好", "宠物", "旅行", "日常开销", "化妆护肤", "群收款", "其他"];
 const INCOME_CATEGORIES = ["生活费", "兼职", "工资", "群收款", "理财", "收益", "礼金", "其他"];
 const REFUND_CATEGORIES = ["退款/抵扣"];
-const EXCLUDED_CATEGORIES = ["排除"];
+const EXCLUDED_CATEGORIES = ["排除", "重复扣款"];
 
 const EXPENSE_CATEGORY_KEYWORDS = [
   ["交通", ["地铁", "公交", "高德打车", "滴滴", "铁路", "12306", "机票", "打车", "停车", "出租车", "网约车"]],
@@ -56,10 +56,7 @@ EXPENSE_INDUSTRY_KEYWORDS.forEach(([category, keywords]) => {
 const GENERIC_MERCHANT_PATTERNS = /淘宝平台商户|淘宝商户|微信支付|支付宝|财付通|抖音支付|京东支付|美团支付|云闪付|银联|Apple Pay|商户消费|扫码支付|二维码付款/i;
 const DINING_CONTEXT_PATTERN = /水饺|饺子|煎饼|烧饼|猪脚饭|鸡饭|外卖订单|快餐|小馆|牛肉馆|潮汕牛肉馆|茶餐厅|菜馆|饭店|餐厅|饭|面馆|粉店|粥铺|包子|馄饨|米线|麻辣烫|黄焖鸡|盖饭|炒饭|拉面|烧烤|火锅|烤肉|便当|小吃/;
 const INSUFFICIENT_CONTEXT_PATTERN = /美团月付|美团月付还款|月付还款|拼多多先用后付|先用后付|微信转账|支付宝转账|转账|收付款|还款/;
-const ALIPAY_TRANSFER_EXCLUDE_PATTERN = /余额宝-自动转入|余额宝自动转入|银行卡定时转入|转出到银行卡|自动转入|定时转入|账户转存|账户转移|基金转入|基金转出|提现|充值到余额|余额充值/;
-const SHIPPING_COMPENSATION_PATTERN = /运费补偿|运费补贴|运费险|退运费|运费赔付|小额打款-?运费补偿/;
 const PDFJS_WORKER_SRC = "https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js";
-const ALIPAY_BACKEND_PARSE_URL = "http://127.0.0.1:8000/api/parse/alipay";
 
 const FIELD_ALIASES = {
   time: ["交易时间", "支付时间", "创建时间", "记账日期", "交易日期", "时间", "日期", "date", "time"],
@@ -91,6 +88,7 @@ let monthlyBills = {};
 let currentTableTransactions = [];
 let currentTablePage = 1;
 let isRestoringTablePage = true;
+const expandedDuplicateGroups = new Set();
 
 const billUploader = document.getElementById("billUploader");
 const monthlyBillsUploader = document.getElementById("monthlyBillsUploader");
@@ -199,6 +197,7 @@ clearStorageButton.addEventListener("click", clearStoredTransactions);
 exportExcelButton.addEventListener("click", exportTransactionsToExcel);
 exportPdfButton.addEventListener("click", exportReportToPdf);
 transactionTable.addEventListener("change", handleTransactionEdit);
+transactionTable.addEventListener("click", handleTransactionTableClick);
 tableSearch.addEventListener("input", handleSearchInput);
 tablePagination?.addEventListener("click", handleTablePaginationClick);
 headerFilterButtons.forEach((button) => {
@@ -425,27 +424,28 @@ async function processFiles(files) {
       return result;
     });
 
-    const transactions = ensureTransactionIds(normalizedResults.filter(Boolean).sort((a, b) => a.date - b.date));
+    const normalizedTransactions = ensureTransactionIds(normalizedResults.filter(Boolean).sort((a, b) => a.date - b.date));
 
     console.info("[Normalize Count]", {
       rawRows: rows.length,
-      transactions: transactions.length,
+      transactions: normalizedTransactions.length,
     });
     console.info("[Analyze Flow] normalize done", {
       inputRows: rows.length,
-      transactions: transactions.length,
-      sample: transactions.slice(0, 3),
+      transactions: normalizedTransactions.length,
+      sample: normalizedTransactions.slice(0, 3),
     });
 
-    if (!transactions.length) {
+    if (!normalizedTransactions.length) {
       setStatus(`识别到 ${rows.length} 条原始记录，但统一字段转换后为 0 条。可能是日期、金额或收支类型格式不兼容。请看 Console 的 normalizeRow dropped。`);
       renderDashboard([]);
       return;
     }
     console.info("[Cross Dedup] function called before render", {
-      total: transactions.length,
+      total: normalizedTransactions.length,
     });
-    findCrossPlatformDuplicateCandidates(transactions);
+    const dedupedTransactions = applyCrossPlatformDedup(normalizedTransactions);
+    const transactions = applyRefundPairing(dedupedTransactions);
     allTransactions = transactions;
     resetTablePage();
     populateMonthFilter(transactions);
@@ -456,7 +456,9 @@ async function processFiles(files) {
   } catch (error) {
     console.error("[Analyze Flow] processFiles error", error);
     const message = error.message || "请检查文件格式";
-    if (message.includes("PDF") || message.includes("pdf")) {
+    if (message.includes("支付宝 PDF 需要启动后端解析服务")) {
+      setStatus(message);
+    } else if (message.includes("PDF") || message.includes("pdf")) {
       setStatus(`PDF 文件读取失败，请检查 PDF.js 加载或文件格式。${message ? ` ${message}` : ""}`);
     } else {
       setStatus(`解析失败：${message}`);
@@ -1382,114 +1384,6 @@ async function readBillFile(file) {
   throw new Error(`${file.name} 不是支持的账单格式`);
 }
 
-function addBillSourceMeta(row, platformFromFile, sourceFromFile) {
-  const unknownSource = "\u672a\u77e5\u6765\u6e90";
-  const existingSource = getTransactionSourcePlatform(row);
-  const explicitSource = detectBillSourcePlatform(`${row["\u8d26\u5355\u6765\u6e90"] || ""} ${row["\u6765\u6e90"] || ""}`);
-  const parserSource = normalizeStatementSourcePlatform(row["\u5e73\u53f0"]);
-  const detectedSource = detectBillSourcePlatform(Object.keys(row).join(" "));
-  const sourcePlatform = [sourceFromFile, existingSource, explicitSource, parserSource, detectedSource].find(
-    (source) => source && source !== unknownSource && source !== "\u672a\u77e5"
-  );
-
-  return {
-    ...row,
-    __platformFromFile: platformFromFile,
-    __sourcePlatform: sourcePlatform || unknownSource,
-  };
-}
-
-function detectBillSourcePlatform(text) {
-  const value = String(text || "");
-  if (/\u4ea4\u6613\u6d41\u6c34\u660e\u7ec6|\u8bb0\u8d26\u65e5\u671f|\u8bb0\u8d26\u65f6\u95f4|\u5bf9\u65b9\u8d26\u6237\u540d|Bank of China|BANK OF CHINA/.test(value)) {
-    return "\u4e2d\u56fd\u94f6\u884c";
-  }
-  if (/\u5fae\u4fe1|wechat|\u8d22\u4ed8\u901a|\u96f6\u94b1/.test(value)) return "\u5fae\u4fe1";
-  if (/\u652f\u4ed8\u5b9d|alipay|\u4f59\u989d\u5b9d|\u82b1\u5457/.test(value)) return "\u652f\u4ed8\u5b9d";
-  if (/\u4e2d\u56fd\u94f6\u884c|\u4e2d\u884c/.test(value)) return "\u4e2d\u56fd\u94f6\u884c";
-  return "\u672a\u77e5\u6765\u6e90";
-}
-
-function normalizeStatementSourcePlatform(value) {
-  const text = cleanCell(value || "");
-  if (/^(微信|支付宝|中国银行)$/.test(text)) return text;
-  if (/^wechat$/i.test(text)) return "微信";
-  if (/^alipay$/i.test(text)) return "支付宝";
-  return "\u672a\u77e5\u6765\u6e90";
-}
-
-function firstKnownSourcePlatform(...sources) {
-  return sources.find((source) => source && source !== "\u672a\u77e5\u6765\u6e90" && source !== "\u672a\u77e5") || "\u672a\u77e5\u6765\u6e90";
-}
-
-function getTransactionSourcePlatform(item) {
-  const value = String(item?.sourcePlatform || item?.__sourcePlatform || item?.billSource || item?.fileSource || "");
-
-  if (value.includes("\u5fae\u4fe1")) return "\u5fae\u4fe1";
-  if (value.includes("\u652f\u4ed8\u5b9d")) return "\u652f\u4ed8\u5b9d";
-  if (value.includes("\u4e2d\u56fd\u94f6\u884c")) return "\u4e2d\u56fd\u94f6\u884c";
-
-  const platform = String(item?.platform || "");
-  if (platform === "\u4e2d\u56fd\u94f6\u884c") return "\u4e2d\u56fd\u94f6\u884c";
-
-  return "\u672a\u77e5";
-}
-
-function detectSourcePlatform(row) {
-  const explicitSource = getTransactionSourcePlatform({
-    sourcePlatform: row?.sourcePlatform || row?.__sourcePlatform || row?.["\u8d26\u5355\u6765\u6e90"] || row?.["\u6765\u6e90"],
-  });
-  if (explicitSource !== "\u672a\u77e5") return explicitSource;
-
-  const parserSource = normalizeStatementSourcePlatform(row?.["\u5e73\u53f0"]);
-  if (parserSource !== "\u672a\u77e5\u6765\u6e90") return parserSource;
-
-  const headerSource = detectBillSourcePlatform(Object.keys(row || {}).join(" "));
-  if (headerSource !== "\u672a\u77e5\u6765\u6e90") return headerSource;
-
-  return "\u672a\u77e5";
-}
-
-function parseCsv(text) {
-  const cleanText = text.replace(/^\uFEFF/, "");
-  const lines = cleanText.split(/\r?\n/).filter((line) => line.trim());
-  if (!lines.length) return [];
-
-  const headerIndex = lines.findIndex((line) => {
-    const cells = splitDelimitedLine(line, detectDelimiter(line));
-    return cells.some((cell) => /时间|日期|金额|收\/支|交易/.test(cell));
-  });
-  const start = Math.max(headerIndex, 0);
-  const delimiter = detectDelimiter(lines[start]);
-  const headers = splitDelimitedLine(lines[start], delimiter).map(cleanCell);
-
-  return lines.slice(start + 1).map((line) => {
-    const cells = splitDelimitedLine(line, delimiter);
-    return headers.reduce((row, header, index) => {
-      row[header || `列${index + 1}`] = cleanCell(cells[index] || "");
-      return row;
-    }, {});
-  });
-}
-
-function rowsToObjects(rows) {
-  const headerIndex = rows.findIndex((row) => isBillHeader(row.map(cleanCell)));
-  if (headerIndex < 0) return [];
-
-  const headers = rows[headerIndex].map(cleanCell);
-  return rows.slice(headerIndex + 1).map((row) => {
-    return headers.reduce((record, header, index) => {
-      record[header || `列${index + 1}`] = cleanCell(row[index] || "");
-      return record;
-    }, {});
-  });
-}
-
-function isBillHeader(cells) {
-  const text = cells.join("|");
-  return /交易时间|支付时间|创建时间|记账日期|交易日期|时间/.test(text) && /金额|收\/支|收入|支出/.test(text);
-}
-
 async function readPdfFile(file) {
   console.info("[PDF Debug] readPdfFile entered", {
     name: file.name,
@@ -1563,15 +1457,9 @@ async function readPdfFile(file) {
         __sourcePlatform: row.__sourcePlatform || "\u652f\u4ed8\u5b9d",
       }));
     } catch (error) {
-      console.warn("[Alipay Backend Parse Failed, fallback to frontend]", error);
+      console.error("[Alipay Backend Parse Required Failed]", error);
+      throw new Error("支付宝 PDF 需要启动后端解析服务。请先启动 backend：uvicorn main:app --reload --host 127.0.0.1 --port 8000，然后重新上传支付宝账单。");
     }
-  }
-
-  const alipayRows = parseAlipayPdfText(text);
-  console.info("[PDF Parser] alipay rows", alipayRows.length);
-  if (alipayRows.length) {
-    console.info("[SpendScope PDF] parser=alipay rows=%d lines=%d", alipayRows.length, lines.length);
-    return alipayRows.map((row) => ({ ...row, __sourcePlatform: "\u652f\u4ed8\u5b9d" }));
   }
 
   const fallbackRows = parsePdfLines(lines, file.name);
@@ -1583,82 +1471,9 @@ async function readPdfFile(file) {
   return fallbackRows;
 }
 
-async function parseAlipayPdfWithBackend(file) {
-  const formData = new FormData();
-  formData.append("file", file);
-
-  console.info("[Alipay Backend Fetch Start]", {
-    url: ALIPAY_BACKEND_PARSE_URL,
-    fileName: file.name,
-  });
-  const response = await fetch(ALIPAY_BACKEND_PARSE_URL, {
-    method: "POST",
-    body: formData,
-  });
-  console.info("[Alipay Backend Fetch Response]", {
-    status: response.status,
-    ok: response.ok,
-  });
-
-  if (!response.ok) {
-    throw new Error(`Alipay backend parse failed with HTTP ${response.status}`);
-  }
-
-  const data = await response.json();
-  console.info("[Alipay Backend Fetch Data]", {
-    ok: data.ok,
-    parser: data.parser,
-    rows: Array.isArray(data.rows) ? data.rows.length : null,
-    debug: data.debug,
-  });
-  if (data?.ok !== true || !Array.isArray(data.rows) || data.rows.length === 0) {
-    throw new Error(data?.error || "Alipay backend returned no rows");
-  }
-
-  console.info("[Alipay Backend Parse]", {
-    parser: data.parser,
-    rows: data.rows.length,
-    debug: data.debug,
-  });
-
-  return data.rows;
-}
-
-function isLikelyAlipayPdf(file, text) {
-  return /支付宝|alipay/i.test(file?.name || "") || /支付宝|余额宝|收\s*\/\s*支|交易对方|商品说明/.test(text || "");
-}
-
 function configurePdfJsWorker(pdfjsLib) {
   if (!pdfjsLib?.GlobalWorkerOptions) return;
   pdfjsLib.GlobalWorkerOptions.workerSrc = PDFJS_WORKER_SRC;
-}
-
-function textItemsToLines(items, pageNumber) {
-  const buckets = new Map();
-
-  items.forEach((item) => {
-    const y = Math.round(item.transform[5]);
-    const key = `${pageNumber}:${y}`;
-    const current = buckets.get(key) || [];
-    current.push({ x: item.transform[4], text: item.str });
-    buckets.set(key, current);
-  });
-
-  return Array.from(buckets.entries())
-    .sort((a, b) => {
-      const [pageA, yA] = a[0].split(":").map(Number);
-      const [pageB, yB] = b[0].split(":").map(Number);
-      return pageA === pageB ? yB - yA : pageA - pageB;
-    })
-    .map(([, lineItems]) =>
-      lineItems
-        .sort((a, b) => a.x - b.x)
-        .map((item) => item.text)
-        .join(" ")
-        .replace(/\s+/g, " ")
-        .trim()
-    )
-    .filter(Boolean);
 }
 
 function parsePdfLines(lines, fileName) {
@@ -1672,856 +1487,6 @@ function parsePdfLines(lines, fileName) {
     .map((line, index) => parseTransactionLine(line, lines[index + 1] || "", platform))
     .filter(Boolean);
   return transactions;
-}
-
-function parseBankOfChinaPdfText(text, lines, fileName) {
-  const isBoc = isBankOfChinaPdfText(text, fileName);
-  if (!isBoc) return [];
-
-  const normalizedLines = lines
-    .map((line) => ({
-      text: maskBankSensitiveText(cleanCell(typeof line === "object" ? line.text : line)),
-      pageNumber: typeof line === "object" ? line.pageNumber : undefined,
-    }))
-    .filter((line) => line.text);
-  const blocks = buildBankOfChinaTransactionBlocks(normalizedLines);
-  const validBlocks = blocks.filter((block) => block.length && isBankOfChinaTransactionStart(block[0].text));
-  const rows = validBlocks
-    .map((block, index) => {
-      const row = parseBankOfChinaBlock(block, fileName);
-      if (!row) {
-        console.warn("[BOC Block Dropped]", {
-          index,
-          page: block[0]?.pageNumber,
-          firstLine: maskBankSensitiveText(block[0]?.text),
-          blockText: maskBankSensitiveText(block.map((line) => line.text).join(" ")),
-          reason: getBankOfChinaBlockDropReason(block),
-        });
-      }
-      return row;
-    })
-    .filter(Boolean);
-  const pageCounts = validBlocks.reduce((counts, block) => {
-    const page = block[0]?.pageNumber || "unknown";
-    counts[page] = (counts[page] || 0) + 1;
-    return counts;
-  }, {});
-  const transactionStartLines = normalizedLines.filter((line) => isBankOfChinaTransactionStart(line.text));
-  const rejectedCandidateLines = normalizedLines
-    .filter((line) => isBankOfChinaRejectedCandidateLine(line.text))
-    .map((line) => ({
-      ...line,
-      reason: getBankOfChinaStartRejectReason(line.text),
-    }));
-
-  console.info("[BOC Blocks]", {
-    inputLines: lines.length,
-    blocks: blocks.length,
-    validBlocks: validBlocks.length,
-  });
-  console.info("[BOC Page Count]", pageCounts);
-
-  console.table(
-    transactionStartLines.map((item) => ({
-      page: item.pageNumber,
-      line: maskBankSensitiveText(item.text),
-    }))
-  );
-  console.table(
-    rejectedCandidateLines.map((item) => ({
-      page: item.pageNumber,
-      line: maskBankSensitiveText(item.text),
-      reason: item.reason,
-    }))
-  );
-  console.info("[BOC Parse]", { rows: rows.length });
-  console.info(`[BOC Parse Result] blocks=${blocks.length} rows=${rows.length}`);
-  console.table(rows.slice(0, 10).map(maskDebugRow));
-
-  return rows;
-}
-
-function buildBankOfChinaTransactionBlocks(lines) {
-  const blocks = [];
-  let currentBlock = null;
-
-  lines.forEach((line) => {
-    if (isBankOfChinaTransactionStart(line.text)) {
-      if (currentBlock?.length) blocks.push(currentBlock);
-      currentBlock = [line];
-      return;
-    }
-
-    if (isBankOfChinaStatementNoiseLine(line.text)) {
-      return;
-    }
-
-    if (currentBlock) {
-      currentBlock.push(line);
-    }
-  });
-
-  if (currentBlock?.length) blocks.push(currentBlock);
-  return blocks;
-}
-
-function isBankOfChinaTransactionStart(line) {
-  const value = String(line || "").trim();
-  return /^20\d{2}[-/.]\d{1,2}[-/.]\d{1,2}\s+\d{1,2}:\d{2}:\d{2}\s+人民币\s+[+-]?\s*\d+(?:,\d{3})*(?:\.\d{2})\s+[+-]?\s*\d+(?:,\d{3})*(?:\.\d{2})/.test(value);
-}
-
-function isBankOfChinaRejectedCandidateLine(line) {
-  const value = String(line || "").trim();
-  if (!value || isBankOfChinaTransactionStart(value)) return false;
-  return /^20\d{2}-04/.test(value) || /人民币/.test(value) || /[+-]?\s*\d+(?:,\d{3})*(?:\.\d{2})/.test(value);
-}
-
-function getBankOfChinaStartRejectReason(line) {
-  const value = String(line || "").trim();
-  if (!/^20\d{2}[-/.]\d{1,2}[-/.]\d{1,2}/.test(value)) return "not line-start date";
-  if (!/^20\d{2}[-/.]\d{1,2}[-/.]\d{1,2}\s+\d{1,2}:\d{2}:\d{2}/.test(value)) return "missing time after date";
-  if (!/人民币/.test(value)) return "missing currency";
-  if (!/人民币\s+[+-]?\s*\d+(?:,\d{3})*(?:\.\d{2})\s+[+-]?\s*\d+(?:,\d{3})*(?:\.\d{2})/.test(value)) return "missing transaction amount and balance after currency";
-  return "unknown";
-}
-
-function isBankOfChinaStatementNoiseLine(line) {
-  const value = String(line || "").trim();
-  return /中国银行交易流水明细清单|交易区间|客户姓名|页数:|借记卡号|借方发生数|贷方发生数|行数:|账号：|按收支筛选|按币种筛选|打印时间|记账日期.*记账时间|对方卡号\/账号|对方开户行|-{5,}END-{5,}|温馨提示|第\s*\d+\s*页\/共\s*\d+\s*页/.test(value);
-}
-
-function inspectBankOfChinaPdfText(text, lines, fileName) {
-  const joined = String(text || "");
-  const isBOC =    /中国银行|Bank of China|中行/.test(joined) ||
-    /记账日期|记账时间|交易名称|对方账户名|人民币|余额/.test(joined);
-
-  const dateLikeLines = lines.filter((line) => /(\d{4}[-/年]?\d{1,2}[-/月]?\d{1,2}|\d{8})/.test(line));
-  const amountLikeLines = lines.filter((line) => /[+-]?\d{1,3}(,\d{3})*(\.\d{2})|[+-]?\d+\.\d{2}/.test(line));
-
-  const result = {
-    isBOC,
-    dateLikeLines,
-    amountLikeLines,
-  };
-
-  console.info("[BOC Inspect]", {
-    file: fileName,
-    isBOC,
-    linesCount: lines.length,
-    dateLikeLineCount: dateLikeLines.length,
-    amountLikeLineCount: amountLikeLines.length,
-    firstLines: lines.slice(0, 30).map(maskBankSensitiveText),
-    sampleDateLines: dateLikeLines.slice(0, 10).map(maskBankSensitiveText),
-    sampleAmountLines: amountLikeLines.slice(0, 10).map(maskBankSensitiveText),
-  });
-
-  return result;
-}
-
-function isBankOfChinaPdfText(text, fileName = "") {
-  const value = `${fileName} ${text}`;
-  return /中国银行|Bank of China|BANK OF CHINA|账户交易明细|中国银行交易明细|交易流水明细清单|电子回单|记账日期|交易日期|对方户名|对方账号|收入金额|支出金额|借方|贷方/.test(value);
-}
-
-function parseBankOfChinaBlock(block, fileName = "") {
-  const lines = Array.isArray(block) ? block : [block];
-  const source = lines
-    .map((line) => String(typeof line === "object" ? line.text : line || "").trim())
-    .filter(Boolean)
-    .join(" ")
-    .replace(/\s+/g, " ")
-    .trim();
-  return parseBankOfChinaLine(source, fileName);
-}
-
-function getBankOfChinaBlockDropReason(block) {
-  const lines = Array.isArray(block) ? block : [block];
-  const source = lines
-    .map((line) => String(typeof line === "object" ? line.text : line || "").trim())
-    .filter(Boolean)
-    .join(" ")
-    .replace(/\s+/g, " ")
-    .trim();
-
-  if (!source) return "empty block";
-  if (/记账日期.*记账时间|交易日期|摘要|收入金额|支出金额|对方户名|对方账号|账户交易明细|中国银行交易流水明细|交易区间|借记卡号/.test(source)) return "block contains statement header/footer text";
-  if (!isBankOfChinaTransactionStart(source)) return "first line no longer matches transaction start";
-  if (!source.match(/(?:20\d{2}[年\-/.]\d{1,2}[月\-/.]\d{1,2}日?|\b20\d{6}\b)(?:\s+\d{1,2}:\d{2}(?::\d{2})?)?/)) return "missing transaction time";
-  if (!extractBankOfChinaAmounts(source)) return "missing transaction amount after currency";
-  return "unknown block parse reason";
-}
-
-function parseBankOfChinaLine(line, fileName = "") {
-  const source = maskBankSensitiveText(String(line || "").replace(/\s+/g, " ").trim());
-  if (!source || /记账日期.*记账时间|交易日期|摘要|收入金额|支出金额|对方户名|对方账号|账户交易明细|中国银行交易流水明细|交易区间|借记卡号/.test(source)) {
-    return null;
-  }
-
-  if (!isBankOfChinaTransactionStart(source)) {
-    return null;
-  }
-
-  const dateMatch = source.match(/(?:20\d{2}[年\-/.]\d{1,2}[月\-/.]\d{1,2}日?|\b20\d{6}\b)(?:\s+\d{1,2}:\d{2}(?::\d{2})?)?/);
-  if (!dateMatch) {
-    return null;
-  }
-
-  const bocTableInfo = extractBankOfChinaTableInfo(source);
-  const amountInfo = bocTableInfo?.amountInfo || extractBankOfChinaAmounts(source);
-  if (!amountInfo || !Number.isFinite(amountInfo.amount) || amountInfo.amount <= 0) {
-    return null;
-  }
-
-  const type = detectBankTransactionType(source, amountInfo);
-  const description = bocTableInfo?.description || cleanBankDescription(source, dateMatch[0], amountInfo.raw);
-  const merchant = bocTableInfo?.merchant || extractBankCounterparty(source, description);
-
-  return {
-    "交易时间": normalizeBankDateTime(dateMatch[0]),
-    "交易对方": merchant,
-    "交易说明": description || merchant,
-    "交易类型": bocTableInfo?.transactionName || inferBankTransactionName(source, type),
-    "收/支": type,
-    "金额": amountInfo.amount.toFixed(2),
-    "平台": "中国银行",
-  };
-}
-
-function extractBankOfChinaTableInfo(line) {
-  const match = line.match(
-    /^(?<date>20\d{2}-\d{1,2}-\d{1,2})\s+(?<time>\d{1,2}:\d{2}:\d{2})\s+人民币\s+(?<amount>[+-]?\s*(?:\d{1,3}(?:,\d{3})+|\d+)\.\d{2})\s+(?<balance>[+-]?\s*(?:\d{1,3}(?:,\d{3})+|\d+)\.\d{2})\s+(?<rest>.+)$/
-  );
-  if (!match?.groups) return null;
-
-  const amountInfo = extractBankOfChinaAmounts(line);
-  if (!amountInfo) return null;
-
-  const rest = match.groups.rest.replace(/\s+/g, " ").trim();
-  const transactionMatch = rest.match(/^(?<name>.+?)\s+(?<channel>银企对接|网上银行|手机银行|柜台|ATM|自助终端|其他)\s+(?<tail>.+)$/);
-  const transactionName = cleanCell(transactionMatch?.groups?.name || inferBankTransactionName(rest, amountInfo.signedValue < 0 ? "支出" : "收入"));
-  const channel = cleanCell(transactionMatch?.groups?.channel || "");
-  const tail = cleanCell(transactionMatch?.groups?.tail || rest);
-  const merchant = extractBankOfChinaMerchant(tail, transactionName);
-  const description = cleanBankDescription(
-    [transactionName, channel, tail].filter(Boolean).join(" "),
-    "",
-    match.groups.amount
-  );
-
-  return {
-    amountInfo,
-    transactionName,
-    merchant,
-    description: description || merchant,
-  };
-}
-
-function extractBankOfChinaAmounts(line) {
-  const match = String(line || "").match(/人民币\s+(?<amount>[+-]?\s*\d+(?:,\d{3})*(?:\.\d{2}))\s+(?<balance>[+-]?\s*\d+(?:,\d{3})*(?:\.\d{2}))/);
-  if (!match?.groups) return null;
-
-  const signedValue = Number(match.groups.amount.replace(/[,\s]/g, ""));
-  const balance = Number(match.groups.balance.replace(/[,\s]/g, ""));
-  if (!Number.isFinite(signedValue) || signedValue === 0 || !Number.isFinite(balance)) return null;
-
-  return {
-    raw: match.groups.amount,
-    balanceRaw: match.groups.balance,
-    signedValue,
-    balance,
-    amount: Math.abs(signedValue),
-  };
-}
-
-function extractBankOfChinaMerchant(text, transactionName = "") {
-  let value = maskBankSensitiveText(text)
-    .replace(/-[-\s]{5,}/g, " ")
-    .replace(/\bZ\d+[A-Z]?\b/gi, " ")
-    .replace(/\b\d{6,}(?:\s+N)?\b/g, " ")
-    .replace(/\bN\b/g, " ")
-    .replace(/中国银行[^ ]*|中国工商银行|中国农业银行|中国建设银行|交通银行|招商银行|支付宝支付科技有限公司/g, " ")
-    .replace(/\d{6,}[:：][^ ]*/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-
-  if (!value || value === "----------") return transactionName || "中国银行交易";
-
-  const platformMerchant = value.match(/((?:财付通|支付宝|抖音支付)-[^\s]{2,60}(?:\s+[^\s\d-]{1,20})?)/)?.[1];
-  if (platformMerchant) return collapseRepeatedBankMerchant(platformMerchant);
-
-  const namedParty = value.match(/(?:^|\s)([\u4e00-\u9fa5A-Za-z·（）()]{2,30})(?:\s|$)/)?.[1];
-  return cleanCell(collapseRepeatedBankMerchant(namedParty || value)) || transactionName || "中国银行交易";
-}
-
-function collapseRepeatedBankMerchant(value) {
-  const parts = String(value || "")
-    .split(/\s+/)
-    .map(cleanCell)
-    .filter(Boolean);
-  if (parts.length >= 2 && parts[0] === parts[1]) return parts[0];
-  if (parts.length >= 2 && parts[1].startsWith(parts[0])) return parts[1];
-  return parts.join(" ").replace(/(.{2,40})\s+\1/g, "$1").trim();
-}
-
-function normalizeBankAmount(line) {
-  const afterCurrency = String(line || "").match(/人民币\s*([+-]?(?:\d{1,3}(?:,\d{3})+|\d+)\.\d{2})/);
-  if (afterCurrency) {
-    const value = Number(afterCurrency[1].replace(/,/g, ""));
-    if (Number.isFinite(value) && value !== 0) {
-      return {
-        raw: afterCurrency[1],
-        signedValue: value,
-        amount: Math.abs(value),
-      };
-    }
-  }
-
-  const moneyPattern = /(?:CNY|RMB|人民币|￥|¥)?\s*[+-]?(?:\d{1,3}(?:,\d{3})+|\d+)\.\d{1,2}/gi;
-  const tokens = Array.from(line.matchAll(moneyPattern))
-    .map((match) => ({
-      raw: match[0],
-      index: match.index || 0,
-      value: Number(String(match[0]).replace(/CNY|RMB|人民币|￥|¥|,/gi, "").replace(/\s+/g, "")),
-    }))
-    .filter((item) => Number.isFinite(item.value) && Math.abs(item.value) > 0)
-    .filter((item) => !/^20\d{6}$/.test(String(item.raw).replace(/\D/g, "")))
-    .filter((item) => !isLikelyDateNumber(line, item));
-
-  if (!tokens.length) return null;
-
-  const signed = tokens.find((item) => /^[\sA-Z￥¥人民币]*[+-]/i.test(item.raw));
-  const selected = signed || (tokens.length > 1 && /余额|账户余额|可用余额/.test(line) ? tokens[0] : tokens[0]);
-  return {
-    raw: selected.raw,
-    signedValue: selected.value,
-    amount: Math.abs(selected.value),
-  };
-}
-
-function isLikelyDateNumber(line, amountToken) {
-  const before = line.slice(Math.max(0, amountToken.index - 2), amountToken.index);
-  const after = line.slice(amountToken.index + amountToken.raw.length, amountToken.index + amountToken.raw.length + 2);
-  return /[年\-/.]/.test(before) || /[月\-/.日]/.test(after);
-}
-
-function detectBankTransactionType(line, amountInfo) {
-  if (/网上快捷退款|退款|退货|退回|冲回|冲正/.test(line)) return "退款";
-  if (/网上快捷提现|余额宝提现|本人|本户|本账户|本人账户|账户互转|账户转移|互转|还款|信用卡还款|理财|基金|申购|赎回|定投|余额转存|定期|账户调整|结息调整/.test(line)) return "排除";
-  if (/收入金额|贷方|入账|转入|工资|薪资|利息|结息|收款|存入|来账/.test(line)) return "收入";
-  if (/支出金额|借方|出账|消费|支付|转出|手续费|取现|扣款|缴费|付款/.test(line)) return "支出";
-  if (amountInfo.signedValue < 0) return "支出";
-  if (amountInfo.signedValue > 0) return "收入";
-  return "支出";
-}
-
-function maskBankSensitiveText(text) {
-  return String(text || "")
-    .replace(/\d{8,}/g, (match) => `****${match.slice(-4)}`)
-    .replace(/1[3-9]\d{9}/g, (match) => `****${match.slice(-4)}`);
-}
-
-function maskDebugRow(row) {
-  if (!row || typeof row !== "object") return row;
-  return Object.fromEntries(Object.entries(row).map(([key, value]) => [key, maskBankSensitiveText(value)]));
-}
-
-function normalizeBankDateTime(value) {
-  const compact = String(value || "").match(/^20\d{6}$/)?.[0];
-  if (compact) return `${compact.slice(0, 4)}-${compact.slice(4, 6)}-${compact.slice(6, 8)} 00:00:00`;
-
-  const date = String(value || "")
-    .replace(/[年月/.]/g, "-")
-    .replace(/日/g, "")
-    .trim();
-  const [datePart, timePart = "00:00:00"] = date.split(/\s+/);
-  const [year, month, day] = datePart.split("-");
-  return `${year}-${String(month || "1").padStart(2, "0")}-${String(day || "1").padStart(2, "0")} ${normalizeTimeText(timePart)}`;
-}
-
-function cleanBankDescription(line, dateText, amountText) {
-  return maskBankSensitiveText(line)
-    .replace(dateText, " ")
-    .replace(amountText, " ")
-    .replace(/(?:CNY|RMB|人民币|￥|¥)?\s*[+-]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d{1,2})?/gi, " ")
-    .replace(/中国银行|Bank of China|BANK OF CHINA|账户余额|可用余额|借方|贷方|收入金额|支出金额/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function extractBankCounterparty(line, fallback) {
-  const match = line.match(/(?:对方户名|户名|收款人|付款人|对方名称)[:：]?\s*([^，,;；\s]{2,40})/);
-  return cleanCell(maskBankSensitiveText(match?.[1] || fallback || "中国银行交易"));
-}
-
-function inferBankTransactionName(line, type) {
-  if (/手续费/.test(line)) return "手续费";
-  if (/工资|薪资/.test(line)) return "工资";
-  if (/利息|结息/.test(line)) return "利息";
-  if (/转账|转入|转出|汇款|来账/.test(line)) return "转账";
-  if (/消费|支付|扣款|缴费/.test(line)) return "消费";
-  if (type === "排除") return "账户调整";
-  return "银行交易";
-}
-
-function parseAlipayPdfText(text) {
-  const lines = text
-    .split(/\r?\n/)
-    .map(cleanCell)
-    .filter(Boolean);
-  const alipayStartCandidates = lines
-    .map((line, index) => ({ index, line }))
-    .filter((item) => isAlipayStartCandidateLine(item.line));
-  const startIndexes = lines
-    .map((line, index) => (isAlipayTransactionStartLine(line, lines[index + 1]) ? index : -1))
-    .filter((index) => index >= 0);
-  const blocks = startIndexes.map((start, index) => {
-    const end = startIndexes[index + 1] ?? lines.length;
-    const rawLines = lines.slice(start, end);
-    const normalizedLines = normalizeAlipayBlockLines(rawLines);
-    return {
-      rawLines,
-      lines: normalizedLines,
-      text: normalizedLines.join(" ").replace(/\s+/g, " ").trim(),
-    };
-  });
-  const rows = [];
-  let droppedBlocks = 0;
-
-  console.info("[Alipay Raw Lines]", {
-    lines: lines.length,
-    sample: lines.slice(0, 80),
-  });
-  console.table(
-    alipayStartCandidates.slice(0, 120).map((item) => ({
-      index: item.index,
-      line: item.line,
-      nextLine: lines[item.index + 1],
-      next2Line: lines[item.index + 2],
-    }))
-  );
-
-  blocks.forEach((block, index) => {
-    const parsed = parseAlipayBlockWithReason(block);
-    if (parsed.row) {
-      rows.push(parsed.row);
-    } else {
-      droppedBlocks += 1;
-      console.warn("[Alipay Dropped Block]", {
-        index,
-        firstLine: block.rawLines?.[0],
-        text: block.text,
-        rawLines: block.rawLines,
-        reason: parsed.reason,
-      });
-    }
-  });
-
-  console.info("[Alipay Keep All]", {
-    startCandidates: startIndexes.length,
-    blocks: blocks.length,
-    rows: rows.length,
-    droppedBlocks,
-  });
-  console.table(
-    rows.slice(0, 30).map((row) => ({
-      time: row["交易时间"],
-      type: row["收/支"],
-      merchant: row["交易对方"],
-      description: row["交易说明"],
-      platform: row["平台"],
-      amount: row["金额"],
-      sourcePlatform: row.__sourcePlatform || row.sourcePlatform,
-    }))
-  );
-
-  logAlipayParseDetail(rows, blocks.length);
-  return rows;
-}
-
-function isAlipayStartCandidateLine(line) {
-  const value = String(line || "").trim();
-  return /^(支出|收入|收支|不计\s*收支|不计收支|不计)/.test(value);
-}
-function isAlipayTransactionStartLine(line, nextLine = "") {
-  const value = String(line || "").trim();
-  const next = String(nextLine || "").trim();
-  return /^(支出|收入|收支|不计\s*收支|不计收支|不计)/.test(value) || (value === "不计" && /^收\s*支/.test(next));
-}
-
-function normalizeAlipayBlockLines(block) {
-  if (block[0] === "不计" && /^收\s*支/.test(block[1] || "")) {
-    return [`不计收支${String(block[1] || "").replace(/^收\s*支/, "")}`.trim(), ...block.slice(2)];
-  }
-  if (block[0] === "不计 收支") {
-    return ["不计收支", ...block.slice(1)];
-  }
-  return block;
-}
-
-function logAlipayParseDetail(rows, blocksLength = rows.length) {
-  const expenseRows = rows.filter((row) => row["收/支"] === "支出").length;
-  const incomeRows = rows.filter((row) => row["收/支"] === "收入").length;
-  const pendingRows = rows.filter((row) => !["支出", "收入"].includes(row["收/支"])).length;
-
-  console.info("[Alipay Parse Detail]", {
-    rows: rows.length,
-    expenseRows,
-    incomeRows,
-    pendingRows,
-  });
-}
-
-function extractAlipayRefundRowsFromText(text) {
-  const lines = text
-    .split(/\r?\n/)
-    .map(cleanCell)
-    .filter(Boolean);
-
-  return lines
-    .map((line, index) => {
-      if (!/退款/.test(line)) return null;
-      const start = Math.max(0, index - 1);
-      const end = Math.min(lines.length, index + 11);
-      return parseAlipayRefundBlock(lines.slice(start, end), line);
-    })
-    .filter(Boolean);
-}
-
-function parseAlipayRefundBlock(block, refundLine) {
-  const refundBlock = block.join(" ").replace(/\s+/g, " ").trim();
-  const time = extractAlipayTime(refundBlock, block);
-  const amount = extractAlipayRefundAmount(refundBlock);
-  if (!time || !Number.isFinite(amount) || amount <= 0) return null;
-
-  const merchant = extractAlipayRefundMerchant(refundBlock);
-  const description = extractAlipayRefundDescription(refundBlock, refundLine);
-  const paymentMethod = extractAlipayPaymentMethod(refundBlock);
-
-  return {
-    "收/支": "退款",
-    原始收支: "退款",
-    交易对方: merchant,
-    商品说明: description,
-    交易说明: description,
-    "收/付款方式": paymentMethod || "",
-    金额: amount,
-    交易时间: time,
-    平台: "支付宝",
-    __sourcePlatform: "支付宝",
-    sourcePlatform: "支付宝",
-    消费类别: categorizeRefund(`${merchant} ${description}`),
-  };
-}
-
-function extractAlipayRefundMerchant(refundBlock) {
-  const betweenNeutralAndRefund = refundBlock.match(/不计\s+(.{1,80}?)\s*退款/)?.[1];
-  const candidate = betweenNeutralAndRefund || refundBlock.match(/([一-龥A-Za-z0-9*·（）()_-]{2,40})\s*退款/)?.[1] || "";
-  return cleanupAlipayRefundText(candidate) || "支付宝退款";
-}
-
-function extractAlipayRefundDescription(refundBlock, refundLine) {
-  const fromRefund = refundBlock.match(/退款[-—]?.{0,160}/)?.[0] || refundLine;
-  return cleanupAlipayRefundText(fromRefund) || "退款";
-}
-
-function extractAlipayRefundAmount(refundBlock) {
-  const refundIndex = refundBlock.indexOf("退款");
-  const dateIndex = refundBlock.search(/\d{4}[-/]\d{1,2}[-/]\d{1,2}/);
-  const preferredText = refundBlock.slice(Math.max(0, refundIndex), dateIndex > refundIndex ? dateIndex : refundBlock.length);
-  const matches = Array.from((preferredText || refundBlock).matchAll(/(?:¥|￥)?\s*(\d{1,6}(?:,\d{3})*\.\d{2})/g))
-    .map((match) => Number(match[1].replace(/,/g, "")))
-    .filter((value) => Number.isFinite(value) && value >= 0.01 && value <= 100000);
-  if (matches.length) return matches[0];
-
-  const fallbackMatches = Array.from(refundBlock.matchAll(/(?:¥|￥)?\s*(\d{1,6}(?:,\d{3})*\.\d{2})/g))
-    .map((match) => Number(match[1].replace(/,/g, "")))
-    .filter((value) => Number.isFinite(value) && value >= 0.01 && value <= 100000);
-  return fallbackMatches[0] || 0;
-}
-
-function cleanupAlipayRefundText(text) {
-  return String(text || "")
-    .replace(/\d{4}[-/]\d{1,2}[-/]\d{1,2}/g, " ")
-    .replace(/\d{1,2}:\d{2}(?::\d{2})?/g, " ")
-    .replace(/(?:¥|￥)?\s*\d{1,6}(?:,\d{3})*\.\d{2}/g, " ")
-    .replace(/\b\d{10,}\b/g, " ")
-    .replace(/不计|收支|余额宝|银行卡|信用卡|储蓄卡|中国银行储蓄卡\(\d+\)/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function mergeDedupAlipayRows(normalRows, refundRows) {
-  const map = new Map();
-
-  [...normalRows, ...refundRows].forEach((row) => {
-    const key = [row["交易时间"], Number(row["金额"]).toFixed(2), row["交易对方"], row["收/支"]].join("|");
-    if (!map.has(key)) map.set(key, row);
-  });
-
-  return Array.from(map.values());
-}
-
-function mergeAlipayLines(lines) {
-  const merged = [];
-
-  for (let index = 0; index < lines.length; index += 1) {
-    const current = lines[index];
-    const next = lines[index + 1] || "";
-    if (/^不计\s*$/.test(current) && /^收\s*支/.test(next)) {
-      merged.push(`不计收支${next.replace(/^收\s*支/, "")}`.trim());
-      index += 1;
-    } else if (/^不计\s+收支/.test(current)) {
-      merged.push(current.replace(/^不计\s+收支/, "不计收支"));
-    } else {
-      merged.push(current);
-    }
-  }
-
-  return merged;
-}
-
-function parseAlipayBlock(block) {
-  return parseAlipayBlockWithReason(block).row;
-}
-
-function parseAlipayBlockWithReason(block) {
-  const lines = Array.isArray(block) ? block : block?.lines || [];
-  const text = Array.isArray(block) ? block.join(" ") : block?.text || lines.join(" ");
-  if (!lines.length) return { row: null, reason: "empty block" };
-
-  const firstLine = lines[0];
-  const rawType = normalizeAlipayRawType(firstLine.match(/^(支出|收入|收支|不计\s*收支|不计收支|不计)/)?.[1]);
-  const type = normalizeAlipayDisplayType(rawType);
-  if (!rawType) {
-    return { row: null, reason: "missing alipay type" };
-  }
-
-  const firstPayload = firstLine.replace(/^(支出|收入|收支|不计\s*收支|不计收支|不计)\s*/, "").trim();
-  const parts = [firstPayload, ...lines.slice(1)].map(cleanCell).filter(Boolean);
-  const blockText = (text || parts.join(" ")).replace(/\s+/g, " ").trim();
-  const transactionTime = extractAlipayTime(blockText, lines);
-  const amount = extractAlipayAmount(blockText, transactionTime);
-  if (!transactionTime) {
-    return { row: null, reason: "missing transaction time" };
-  }
-  if (!Number.isFinite(amount) || amount <= 0) {
-    return { row: null, reason: "missing transaction amount" };
-  }
-
-  const merchant = extractAlipayMerchant(parts) || "支付宝";
-  const description = extractAlipayDescription(parts, merchant, transactionTime, amount) || merchant || "支付宝";
-  const paymentMethod = extractAlipayPaymentMethod(blockText);
-  const row = {
-    "收/支": type,
-    原始收支: rawType,
-    交易对方: merchant,
-    商品说明: description,
-    交易说明: description || blockText || "支付宝",
-    "收/付款方式": paymentMethod,
-    金额: amount,
-    交易时间: transactionTime,
-    平台: "支付宝",
-    __sourcePlatform: "支付宝",
-    sourcePlatform: "支付宝",
-    __rawBlockText: blockText,
-    __rawLines: block.rawLines || lines,
-    __normalizedLines: lines,
-    原始文本: blockText,
-  };
-
-  return { row: normalizeAlipayTransactionType(row), reason: "" };
-}
-
-function normalizeAlipayRawType(type) {
-  const value = String(type || "").replace(/\s+/g, "");
-  if (value === "不计收支") return "不计收支";
-  return value;
-}
-
-function normalizeAlipayDisplayType(rawType) {
-  if (rawType === "支出" || rawType === "收入") return rawType;
-  return "排除";
-}
-
-function normalizeAlipayTransactionType(row) {
-  const type = row["收/支"];
-  if (type === "支出" || type === "收入") return row;
-
-  const rawType = row["原始收支"] || row.rawType || row.originalType || type || "未知";
-  return {
-    ...row,
-    "收/支": "排除",
-    消费类别: "排除",
-    excludeReason: "支付宝待分类",
-    rawType,
-    originalType: rawType,
-  };
-}
-
-function extractAlipayTime(blockText, block) {
-  const date = blockText.match(/\d{4}[-/]\d{1,2}[-/]\d{1,2}/)?.[0];
-  const time = blockText.match(/\b\d{1,2}:\d{2}(?::\d{2})?\b/)?.[0];
-  if (date && time) return `${normalizeDateText(date)} ${normalizeTimeText(time)}`;
-  if (date) return `${normalizeDateText(date)} 00:00:00`;
-
-  for (let index = 0; index < block.length - 1; index += 1) {
-    const dateLine = block[index].match(/^\d{4}[-/]\d{1,2}[-/]\d{1,2}$/)?.[0];
-    const timeLine = block[index + 1].match(/^\d{1,2}:\d{2}(?::\d{2})?$/)?.[0];
-    if (dateLine && timeLine) return `${normalizeDateText(dateLine)} ${normalizeTimeText(timeLine)}`;
-  }
-
-  const dateLine = block.find((line) => /^\d{4}[-/]\d{1,2}[-/]\d{1,2}$/.test(line));
-  if (dateLine) return `${normalizeDateText(dateLine)} 00:00:00`;
-
-  return "";
-}
-
-function extractAlipayAmount(blockText, transactionTime) {
-  const searchText = (transactionTime ? blockText.replace(transactionTime, " ") : blockText)
-    .replace(/\d{4}[-/]\d{1,2}[-/]\d{1,2}/g, " ")
-    .replace(/\b\d{1,2}:\d{2}(?::\d{2})?\b/g, " ");
-  const candidates = Array.from(searchText.matchAll(/(?:¥|￥)?\s*(\d{1,6}(?:,\d{3})*\.\d{2})/g))
-    .map((match) => Number(match[1].replace(/,/g, "")))
-    .filter((value) => Number.isFinite(value) && value > 0);
-
-  if (!candidates.length) return 0;
-  return candidates[0];
-}
-
-function extractAlipayMerchant(parts) {
-  const ignored = /^(交易成功|支付成功|退款成功|已退款|付款|收款|余额|余额宝|花呗|银行卡|支付宝|订单号|商家订单号)$/;
-  for (const part of parts) {
-    const tokens = part
-      .replace(/\d{4}[-/]\d{1,2}[-/]\d{1,2}/g, " ")
-      .replace(/\d{1,2}:\d{2}(?::\d{2})?/g, " ")
-      .replace(/(?:¥|￥)?\s*\d{1,6}(?:,\d{3})*\.\d{2}/g, " ")
-      .replace(/\b\d{12,}\b/g, " ")
-      .split(/\s+/)
-      .map(cleanCell)
-      .filter(Boolean);
-    const merchant = tokens.find((token) => !ignored.test(token));
-    if (merchant) return merchant;
-  }
-
-  return "支付宝交易";
-}
-
-function extractAlipayDescription(parts, merchant, transactionTime, amount) {
-  const amountText = amount.toFixed(2);
-  const description = parts
-    .filter((part) => part !== merchant)
-    .filter((part) => !transactionTime.includes(part))
-    .filter((part) => !part.includes(amountText))
-    .filter((part) => !/^\d{12,}$/.test(part))
-    .filter((part) => !/^\d{4}[-/]\d{1,2}[-/]\d{1,2}$/.test(part))
-    .filter((part) => !/^\d{1,2}:\d{2}(?::\d{2})?$/.test(part))
-    .join(" ")
-    .replace(/\s+/g, " ")
-    .trim();
-
-  return description || merchant;
-}
-
-function extractAlipayPaymentMethod(blockText) {
-  return blockText.match(/亲情卡|余额宝|余额|花呗|银行卡|信用卡|储蓄卡|网商银行|支付宝/)?.[0] || "";
-}
-
-function normalizeDateText(date) {
-  const [year, month, day] = date.replace(/\//g, "-").split("-");
-  return `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}`;
-}
-
-function normalizeTimeText(time) {
-  const parts = time.split(":");
-  return `${parts[0].padStart(2, "0")}:${parts[1].padStart(2, "0")}:${(parts[2] || "00").padStart(2, "0")}`;
-}
-
-function splitPdfLine(line) {
-  return line.split(/\s{2,}|\t+/).map(cleanCell).filter(Boolean);
-}
-
-function parseTransactionLine(line, nextLine, platform) {
-  const text = `${line} ${nextLine}`.replace(/\s+/g, " ").trim();
-  const dates = text.match(/\d{4}[-/]\d{1,2}[-/]\d{1,2}\s+\d{1,2}:\d{2}(?::\d{2})?/g);
-  if (!dates) return null;
-
-  const typeMatch = text.match(/收入|支出|不计收支|中性/);
-  const amountMatches = Array.from(text.matchAll(/[¥￥]?\s*-?\d+(?:,\d{3})*(?:\.\d{1,2})/g)).map((match) => match[0]);
-  const amountText = amountMatches.find((value) => Math.abs(toNumber(value)) > 0);
-  if (!amountText) return null;
-
-  const merchant = guessMerchantFromPdfLine(text, dates);
-  return {
-    交易时间: dates[0],
-    平台: platform,
-    交易对方: merchant,
-    商品: merchant,
-    "收/支": typeMatch ? typeMatch[0].replace("不计收支", "中性") : "",
-    "金额(元)": Math.abs(toNumber(amountText)),
-  };
-}
-
-function guessMerchantFromPdfLine(text, dates) {
-  let cleaned = text;
-  dates.forEach((date) => {
-    cleaned = cleaned.replace(date, " ");
-  });
-  cleaned = cleaned
-    .replace(/[¥￥]?\s*-?\d+(?:,\d{3})*(?:\.\d{1,2})/g, " ")
-    .replace(/收入|支出|不计收支|中性|交易成功|支付成功|已退款|退款成功/g, " ")
-    .replace(/\b\d{12,}\b/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-
-  const parts = cleaned.split(" ").filter((part) => part.length > 1);
-  return parts.slice(-2).join(" ") || "支付宝交易";
-}
-
-async function readTextFile(file) {
-  const buffer = await file.arrayBuffer();
-  const utf8 = new TextDecoder("utf-8").decode(buffer);
-  if (looksReadableBill(utf8)) return utf8;
-
-  try {
-    const gbText = new TextDecoder("gb18030").decode(buffer);
-    return looksReadableBill(gbText) ? gbText : utf8;
-  } catch {
-    return utf8;
-  }
-}
-
-function looksReadableBill(text) {
-  return /交易|时间|日期|金额|收入|支出|收\/支|支付宝|微信|银行/.test(text) && !text.includes("�");
-}
-
-function detectDelimiter(line) {
-    const commaCount = (line.match(/,/g) || []).length;
-  const tabCount = (line.match(/\t/g) || []).length;
-  return tabCount > commaCount ? "\t" : ",";
-}
-
-function splitDelimitedLine(line, delimiter) {
-  const cells = [];
-  let value = "";
-  let quoted = false;
-
-  for (let index = 0; index < line.length; index += 1) {
-    const char = line[index];
-    const next = line[index + 1];
-    if (char === '"' && quoted && next === '"') {
-      value += '"';
-      index += 1;
-    } else if (char === '"') {
-      quoted = !quoted;
-    } else if (char === delimiter && !quoted) {
-      cells.push(value);
-      value = "";
-    } else {
-      value += char;
-    }
-  }
-  cells.push(value);
-  return cells;
 }
 
 function normalizeRow(row) {
@@ -2577,87 +1542,6 @@ function normalizeRow(row) {
   return applyAlipayClassificationRules(result, row);
 }
 
-function applyAlipayClassificationRules(transaction, row = {}) {
-  if (transaction.sourcePlatform !== "支付宝") return transaction;
-
-  const descriptionText = [
-    row.__rawBlockText,
-    row["原始文本"],
-    Array.isArray(row.__rawLines) ? row.__rawLines.join(" ") : "",
-    Array.isArray(row.__normalizedLines) ? row.__normalizedLines.join(" ") : "",
-    row["商品说明"],
-    row["交易说明"],
-    row.description,
-    transaction.description,
-  ].join(" ");
-  const paymentText = [
-    row.__rawBlockText,
-    row["原始文本"],
-    Array.isArray(row.__rawLines) ? row.__rawLines.join(" ") : "",
-    Array.isArray(row.__normalizedLines) ? row.__normalizedLines.join(" ") : "",
-    row["收/付款方式"],
-    row["付款方式"],
-    row["支付方式"],
-    row.platform,
-    transaction.platform,
-  ].join(" ");
-  const normalizedDescription = normalizeAlipayRuleText(descriptionText);
-  const normalizedPlatform = normalizeAlipayRuleText(paymentText);
-
-  if (normalizedDescription.includes("收益发放") && normalizedPlatform.includes("余额宝")) {
-    console.info("[Alipay Income Override Hit]", {
-      merchant: transaction.merchant,
-      description: transaction.description,
-      platform: transaction.platform,
-      rawText: row.__rawBlockText || row["原始文本"],
-      type: "收入",
-      category: "收益",
-    });
-    return {
-      ...transaction,
-      type: "收入",
-      category: "收益",
-      excludeReason: "",
-    };
-  }
-
-  if (/亲情卡/.test(normalizedPlatform)) {
-    return {
-      ...transaction,
-      type: "排除",
-      category: "排除",
-      excludeReason: "亲情卡",
-    };
-  }
-
-  if (normalizedDescription.includes("余额宝自动转入")) {
-    return {
-      ...transaction,
-      type: "排除",
-      category: "排除",
-      excludeReason: "余额宝自动转入",
-    };
-  }
-
-  return transaction;
-}
-
-function normalizeAlipayRuleText(value) {
-  return String(value || "")
-    .replace(/[\s\uFEFF\uFFFE\u200B-\u200D\u2060]/g, "")
-    .replace(/[^\u4e00-\u9fa5A-Za-z0-9]/g, "");
-}
-
-function normalizeAlipayTransactionTypeText(typeText, row) {
-  const raw = String(typeText || row["原始收支"] || row.rawType || row.originalType || "").replace(/\s+/g, "");
-  const text = `${raw} ${row["交易对方"] || ""} ${row["商品说明"] || ""} ${row["交易说明"] || ""}`;
-  if (/退款|退货|售后退款|运费补偿|运费补贴|运费险|退运费|运费赔付/.test(text)) return "退款";
-  if (/排除|不计收支|不计|中性|收支/.test(raw)) return "排除";
-  if (/支出|付款|借|消费/.test(raw)) return "支出";
-  if (/收入|收款|贷|入账/.test(raw)) return "收入";
-  return "";
-}
-
 function getNormalizeDropReason(row) {
   const fields = mapFields(row);
   const amount = parseAmount(fields.amount, row);
@@ -2676,8 +1560,7 @@ function getNormalizeDropReason(row) {
 }
 
 function findCrossPlatformDuplicateCandidates(transactions) {
-  console.info("[Cross Dedup] entered", { total: transactions.length });
-  return [];
+  return applyCrossPlatformDedup(transactions);
 }
 
 function mapFields(row) {
@@ -2693,38 +1576,6 @@ function sameHeader(name, alias) {
   return String(name).trim().toLowerCase().replace(/\s/g, "") === alias.toLowerCase().replace(/\s/g, "");
 }
 
-function parseAmount(value, row) {
-  const direct = toNumber(value);
-  if (Number.isFinite(direct) && direct !== 0) return direct;
-
-  const expenseKey = Object.keys(row).find((key) => /支出/.test(key));
-  const incomeKey = Object.keys(row).find((key) => /收入/.test(key));
-  const expense = expenseKey ? toNumber(row[expenseKey]) : 0;
-  const income = incomeKey ? toNumber(row[incomeKey]) : 0;
-
-  if (expense) return -Math.abs(expense);
-  if (income) return Math.abs(income);
-  return 0;
-}
-
-function toNumber(value) {
-  const text = String(value ?? "").replace(/[¥￥,\s]/g, "").replace(/[()]/g, "-");
-  const match = text.match(/-?\d+(\.\d+)?/);
-  return match ? Number(match[0]) : 0;
-}
-
-function parseDate(value) {
-  if (value instanceof Date && !Number.isNaN(value.getTime())) return value;
-  if (typeof value === "number") {
-    const excelEpoch = new Date(Date.UTC(1899, 11, 30));
-    return new Date(excelEpoch.getTime() + value * 86400000);
-  }
-  const text = String(value || "").trim().replace(/\//g, "-");
-  const normalized = /^\d{4}-\d{1,2}-\d{1,2}/.test(text) ? text : text.replace(/^(\d{1,2})-(\d{1,2})/, `${new Date().getFullYear()}-$1-$2`);
-  const date = new Date(normalized);
-  return Number.isNaN(date.getTime()) ? null : date;
-}
-
 function detectType(typeText, amount, row) {
   const text = `${typeText} ${Object.values(row).join(" ")}`;
   if (/中性|不计收支|^\/$/.test(typeText)) return "排除";
@@ -2737,14 +1588,6 @@ function detectType(typeText, amount, row) {
   if (/收入|收款|贷|入账|\+/.test(text)) return "收入";
   return amount < 0 ? "支出" : "收入";
   }
-
-function detectPlatform(text) {
-  const value = String(text).toLowerCase();
-  if (/微信|wechat/.test(value)) return "微信";
-  if (/支付宝|alipay/.test(value)) return "支付宝";
-  if (/银行|银行卡|信用卡|储蓄卡|bank|cmb|icbc|ccb|abc|boc/.test(value)) return "银行";
-  return "未知来源";
-}
 
 function categorize(input) {
   const parts = normalizeCategoryInput(input);
@@ -2856,14 +1699,69 @@ function normalizeCategoryForType(type, category, input = "") {
   return inferCategory(type, input);
 }
 
-function renderDashboard(transactions) {
+function getNetExpenseSummary(transactions) {
   const expenses = transactions.filter((item) => item.type === "支出");
-  const incomes = transactions.filter((item) => item.type === "收入");
   const refunds = transactions.filter((item) => item.type === "退款");
+  const pairedRefunds = refunds.filter((item) => item.refundGroupKey);
+  const unpairedRefunds = refunds.filter((item) => !item.refundGroupKey);
+  const pairedRefundAmount = sum(pairedRefunds);
+  const unpairedRefundAmount = sum(unpairedRefunds);
+  const totalRefund = pairedRefundAmount + unpairedRefundAmount;
+  const refundAmountByGroup = pairedRefunds.reduce((groups, refund) => {
+    groups.set(refund.refundGroupKey, (groups.get(refund.refundGroupKey) || 0) + Number(refund.amount || 0));
+    return groups;
+  }, new Map());
+
+  const grossExpense = sum(expenses);
+  const pairedOriginalExpenses = expenses.filter((item) => item.refundPairRole === "originalExpense" && item.refundGroupKey);
+  const totalExpenseBeforeUnpairedRefund = expenses.reduce((total, item) => {
+    if (item.refundPairRole !== "originalExpense" || !item.refundGroupKey) {
+      return total + Number(item.amount || 0);
+    }
+
+    const explicitRefundedAmount = Number(item.refundedAmount);
+    const matchedRefundAmount = Number.isFinite(explicitRefundedAmount) ? explicitRefundedAmount : refundAmountByGroup.get(item.refundGroupKey) || 0;
+    return total + Math.max(0, Number(item.amount || 0) - matchedRefundAmount);
+  }, 0);
+  const totalExpense = Math.max(0, totalExpenseBeforeUnpairedRefund - unpairedRefundAmount);
+
+  console.info("[Refund Net Summary]", {
+    transactions: transactions.length,
+    grossExpense,
+    pairedRefundAmount,
+    unpairedRefundAmount,
+    totalRefund,
+    totalExpense,
+    pairedOriginalExpenses: pairedOriginalExpenses.length,
+    pairedRefunds: pairedRefunds.length,
+    unpairedRefunds: unpairedRefunds.length,
+  });
+
+  return {
+    expenses,
+    refunds,
+    pairedRefunds,
+    unpairedRefunds,
+    grossExpense,
+    pairedRefundAmount,
+    unpairedRefundAmount,
+    totalRefund,
+    totalExpense,
+  };
+}
+
+function renderDashboard(transactions) {
+  const netExpenseSummary = getNetExpenseSummary(transactions);
+  const expenses = netExpenseSummary.expenses;
+  const incomes = transactions.filter((item) => item.type === "收入");
+  const refunds = netExpenseSummary.refunds;
   const totalIncome = sum(incomes);
-  const totalRefund = sum(refunds);
-  const totalExpense = Math.max(0, sum(expenses) - totalRefund);
+  const totalRefund = netExpenseSummary.totalRefund;
+  const totalExpense = netExpenseSummary.totalExpense;
   const net = totalIncome - totalExpense;
+  const summaryTotalRefund = sum(refunds);
+  const summaryTotalExpense = Math.max(0, sum(expenses) - summaryTotalRefund);
+  const summaryNet = totalIncome - summaryTotalExpense;
 
   document.getElementById("totalIncome").textContent = money.format(totalIncome);
   document.getElementById("totalExpense").textContent = money.format(totalExpense);
@@ -2874,7 +1772,7 @@ function renderDashboard(transactions) {
   renderChart("platformChart", "bar", aggregateNet(expenses, refunds, "platform"), "平台支出");
   renderDailyChart(expenses, refunds);
   document.getElementById("aiSummary").textContent = "正在整理你的月度消费洞察…";
-  renderSummary({ transactions, expenses, incomes, refunds, totalIncome, totalExpense, totalRefund, net });
+  renderSummary({ transactions, expenses, incomes, refunds, totalIncome, totalExpense: summaryTotalExpense, totalRefund: summaryTotalRefund, net: summaryNet });
   currentTableTransactions = sortTransactionsForTable(transactions);
   updateFilterOptions();
   applyTableFilters();
@@ -2882,11 +1780,120 @@ function renderDashboard(transactions) {
 }
 
 function sortTransactionsForTable(transactions) {
-  return transactions.slice().sort((a, b) => {
-    if (a.type === "退款" && b.type !== "退款") return -1;
-    if (a.type !== "退款" && b.type === "退款") return 1;
-    return b.date - a.date;
-  });
+  return sortTransactionsForDisplay(transactions);
+}
+
+function sortTransactionsForDisplay(transactions) {
+  const duplicateGroupMap = buildDuplicateGroupMap(transactions);
+  const refundGroupMap = buildRefundGroupMap(transactions);
+
+  return transactions
+    .map((transaction, index) => ({ transaction, index }))
+    .sort((a, b) => {
+      const groupA = getDisplaySortInfo(a.transaction, duplicateGroupMap, refundGroupMap);
+      const groupB = getDisplaySortInfo(b.transaction, duplicateGroupMap, refundGroupMap);
+
+      if (groupA.type && groupA.type === groupB.type && groupA.key && groupA.key === groupB.key) {
+        const roleOrderA = getDisplayPairRoleOrder(a.transaction, groupA.type);
+        const roleOrderB = getDisplayPairRoleOrder(b.transaction, groupB.type);
+        if (roleOrderA !== roleOrderB) return roleOrderA - roleOrderB;
+        const timeDiff = getTransactionTimeValue(b.transaction) - getTransactionTimeValue(a.transaction);
+        if (timeDiff !== 0) return timeDiff;
+        return a.index - b.index;
+      }
+
+      if (groupA.time !== groupB.time) return groupB.time - groupA.time;
+
+      const timeDiff = getTransactionTimeValue(b.transaction) - getTransactionTimeValue(a.transaction);
+      if (timeDiff !== 0) return timeDiff;
+      return a.index - b.index;
+    })
+    .map(({ transaction }) => transaction);
+}
+
+function buildDuplicateGroupMap(transactions) {
+  return transactions.reduce((groups, transaction) => {
+    if (!transaction.duplicateGroupKey) return groups;
+    const group = groups.get(transaction.duplicateGroupKey) || { primaryTime: null };
+    if (transaction.duplicatePairRole === "primaryPayment") {
+      group.primaryTime = getTransactionTimeValue(transaction);
+    }
+    groups.set(transaction.duplicateGroupKey, group);
+    return groups;
+  }, new Map());
+}
+
+function getDuplicateSortInfo(transaction, duplicateGroupMap) {
+  const key = transaction.duplicateGroupKey || "";
+  const group = key ? duplicateGroupMap.get(key) : null;
+  const fallbackTime = getTransactionTimeValue(transaction);
+  return {
+    key,
+    time: Number.isFinite(group?.primaryTime) ? group.primaryTime : fallbackTime,
+  };
+}
+
+function buildRefundGroupMap(transactions) {
+  return transactions.reduce((groups, transaction) => {
+    if (!transaction.refundGroupKey) return groups;
+    const group = groups.get(transaction.refundGroupKey) || { originalTime: null };
+    if (transaction.refundPairRole === "originalExpense") {
+      group.originalTime = getTransactionTimeValue(transaction);
+    }
+    groups.set(transaction.refundGroupKey, group);
+    return groups;
+  }, new Map());
+}
+
+function getRefundSortInfo(transaction, refundGroupMap) {
+  const key = transaction.refundGroupKey || "";
+  const group = key ? refundGroupMap.get(key) : null;
+  const fallbackTime = getTransactionTimeValue(transaction);
+  return {
+    key,
+    time: Number.isFinite(group?.originalTime) ? group.originalTime : fallbackTime,
+  };
+}
+
+function getDisplaySortInfo(transaction, duplicateGroupMap, refundGroupMap) {
+  const duplicateInfo = getDuplicateSortInfo(transaction, duplicateGroupMap);
+  if (duplicateInfo.key) {
+    return { ...duplicateInfo, type: "duplicate" };
+  }
+
+  const refundInfo = getRefundSortInfo(transaction, refundGroupMap);
+  if (refundInfo.key) {
+    return { ...refundInfo, type: "refund" };
+  }
+
+  return {
+    key: "",
+    type: "",
+    time: getTransactionTimeValue(transaction),
+  };
+}
+
+function getDisplayPairRoleOrder(transaction, groupType) {
+  if (groupType === "duplicate") return getDuplicatePairRoleOrder(transaction);
+  if (groupType === "refund") return getRefundPairRoleOrder(transaction);
+  return 2;
+}
+
+function getDuplicatePairRoleOrder(transaction) {
+  if (transaction.duplicatePairRole === "primaryPayment") return 0;
+  if (transaction.duplicatePairRole === "bankDuplicate") return 1;
+  return 2;
+}
+
+function getRefundPairRoleOrder(transaction) {
+  if (transaction.refundPairRole === "originalExpense") return 0;
+  if (transaction.refundPairRole === "refund") return 1;
+  return 2;
+}
+
+function getTransactionTimeValue(transaction) {
+  const value = transaction?.date instanceof Date ? transaction.date.getTime() : new Date(transaction?.date).getTime();
+  return Number.isFinite(value) ? value : 0;
 }
 
 function populateMonthFilter(transactions) {
@@ -3017,32 +2024,113 @@ function renderTable(rows, total, filteredCount = rows.length, totalPages = 0) {
     return;
   }
 
-  tbody.innerHTML = rows
+  const displayRows = buildTableDisplayRows(rows);
+  tbody.innerHTML = displayRows
     .map(
-      (item) => {
-        const displayTime = formatTableTime(item.time);
-        const transactionType = item.transactionType || "-";
-        return `
-          <tr data-id="${escapeHtml(item.id)}">
-            <td data-label="时间" class="time-cell">
-              <div class="time-date">${escapeHtml(displayTime.date)}</div>
-              ${displayTime.clock ? `<div class="time-clock">${escapeHtml(displayTime.clock)}</div>` : ""}
-            </td>
-            <td data-label="账单来源" class="source-cell">${escapeHtml(getTransactionSourcePlatform(item))}</td>
-            <td data-label="收/付款方式" class="payment-cell">${escapeHtml(item.platform || "-")}</td>
-            <td data-label="交易对方" class="merchant-cell">${escapeHtml(item.merchant || "-")}</td>
-            <td data-label="交易说明" class="description-cell">
-              <div class="description-main">${escapeHtml(getTransactionDescriptionSummary(item))}</div>
-              ${transactionType !== "-" ? `<div class="description-sub">${escapeHtml(transactionType)}</div>` : ""}
-            </td>
-            <td data-label="类别">${renderCategorySelect(item)}</td>
-            <td data-label="收支类型">${renderTypeSelect(item)}</td>
-            <td data-label="金额" class="amount-cell ${getAmountClass(item.type)}">${formatDisplayAmount(item)}</td>
-          </tr>
-        `;
-      }
+      (entry) => (entry.kind === "duplicateExpanded" ? renderDuplicateExpandedRow(entry.item) : renderTransactionTableRow(entry.item, entry.children))
     )
     .join("");
+}
+
+function buildTableDisplayRows(rows) {
+  if (isDuplicateOnlyFilterActive()) {
+    return rows.map((item) => ({ kind: "transaction", item, children: [] }));
+  }
+
+  const duplicatesByGroup = rows.reduce((groups, item) => {
+    if (item.duplicatePairRole !== "bankDuplicate" || !item.duplicateGroupKey) return groups;
+    const children = groups.get(item.duplicateGroupKey) || [];
+    children.push(item);
+    groups.set(item.duplicateGroupKey, children);
+    return groups;
+  }, new Map());
+
+  return rows.flatMap((item) => {
+    if (item.duplicatePairRole === "bankDuplicate" && item.duplicateGroupKey) return [];
+    const children = item.duplicatePairRole === "primaryPayment" ? duplicatesByGroup.get(item.duplicateGroupKey) || [] : [];
+    const expandedChildren = expandedDuplicateGroups.has(item.duplicateGroupKey) ? children.map((child) => ({ kind: "duplicateExpanded", item: child })) : [];
+    return [{ kind: "transaction", item, children }, ...expandedChildren];
+  });
+}
+
+function isDuplicateOnlyFilterActive() {
+  return tableFilters.type === "排除" || tableFilters.category === "重复扣款";
+}
+
+function renderTransactionTableRow(item, duplicateChildren = []) {
+  const displayTime = formatTableTime(item.time);
+  const transactionType = item.transactionType || "-";
+  const duplicateToggle = duplicateChildren.length ? renderDuplicateToggle(item.duplicateGroupKey) : "";
+
+  return `
+    <tr data-id="${escapeHtml(item.id)}">
+      <td data-label="时间" class="time-cell">
+        <div class="time-date">${escapeHtml(displayTime.date)}</div>
+        ${displayTime.clock ? `<div class="time-clock">${escapeHtml(displayTime.clock)}</div>` : ""}
+        ${duplicateToggle}
+      </td>
+      <td data-label="账单来源" class="source-cell">${escapeHtml(getTransactionSourcePlatform(item))}</td>
+      <td data-label="收/付款方式" class="payment-cell">${escapeHtml(item.platform || "-")}</td>
+      <td data-label="交易对方" class="merchant-cell">${escapeHtml(item.merchant || "-")}</td>
+      <td data-label="交易说明" class="description-cell">
+        <div class="description-main">${escapeHtml(getTransactionDescriptionSummary(item))}</div>
+        ${transactionType !== "-" ? `<div class="description-sub">${escapeHtml(transactionType)}</div>` : ""}
+      </td>
+      <td data-label="类别">${renderCategorySelect(item)}</td>
+      <td data-label="收支类型">${renderTypeSelect(item)}</td>
+      <td data-label="金额" class="amount-cell ${getAmountClass(item.type)}">${formatDisplayAmount(item)}</td>
+    </tr>
+  `;
+}
+
+function renderDuplicateToggle(groupKey) {
+  const isExpanded = expandedDuplicateGroups.has(groupKey);
+  return `
+    <button class="duplicate-toggle time-duplicate-toggle" type="button" data-duplicate-group="${escapeHtml(groupKey || "")}" title="银行重复扣款">
+      ${isExpanded ? "▾" : "▸"}
+    </button>
+  `;
+}
+
+function renderDuplicateExpandedRow(item) {
+  const displayTime = formatTableTime(item.time);
+  const transactionType = item.transactionType || "-";
+
+  return `
+    <tr class="duplicate-expanded-row" data-id="${escapeHtml(item.id)}" data-duplicate-group="${escapeHtml(item.duplicateGroupKey || "")}">
+      <td data-label="时间" class="time-cell">
+        <div class="time-date">${escapeHtml(displayTime.date)}</div>
+        ${displayTime.clock ? `<div class="time-clock">${escapeHtml(displayTime.clock)}</div>` : ""}
+      </td>
+      <td data-label="账单来源" class="source-cell">${escapeHtml(getTransactionSourcePlatform(item))}</td>
+      <td data-label="收/付款方式" class="payment-cell">${escapeHtml(item.platform || "-")}</td>
+      <td data-label="交易对方" class="merchant-cell">${escapeHtml(item.merchant || "-")}</td>
+      <td data-label="交易说明" class="description-cell">
+        <div class="description-main">${escapeHtml(getTransactionDescriptionSummary(item))}</div>
+        ${transactionType !== "-" ? `<div class="description-sub">${escapeHtml(transactionType)}</div>` : ""}
+      </td>
+      <td data-label="类别">${renderCategorySelect(item)}</td>
+      <td data-label="收支类型">${renderTypeSelect(item)}</td>
+      <td data-label="金额" class="amount-cell ${getAmountClass(item.type)}">${formatDisplayAmount(item)}</td>
+    </tr>
+  `;
+}
+
+function handleTransactionTableClick(event) {
+  const toggle = event.target.closest(".duplicate-toggle");
+  if (!toggle) return;
+
+  event.preventDefault();
+  event.stopPropagation();
+  const groupKey = toggle.dataset.duplicateGroup || "";
+  if (!groupKey) return;
+
+  if (expandedDuplicateGroups.has(groupKey)) {
+    expandedDuplicateGroups.delete(groupKey);
+  } else {
+    expandedDuplicateGroups.add(groupKey);
+  }
+  applyTableFilters();
 }
 
 function updateFilterOptions() {
@@ -3176,11 +2264,7 @@ function applyTableFilters() {
     currentTablePage = 1;
   }
   if (totalPages > 0) saveCurrentTablePage();
-  const sortedTransactions = [...filtered].sort((a, b) => {
-    const timeA = a.date instanceof Date ? a.date.getTime() : new Date(a.date).getTime();
-    const timeB = b.date instanceof Date ? b.date.getTime() : new Date(b.date).getTime();
-    return timeB - timeA;
-  });
+  const sortedTransactions = sortTransactionsForDisplay(filtered);
   const start = (currentTablePage - 1) * PAGE_SIZE;
   const end = start + PAGE_SIZE;
   const pageTransactions = sortedTransactions.slice(start, end);
@@ -3421,10 +2505,6 @@ function sum(items) {
 
 function percent(value, total) {
   return total ? `${Math.round((value / total) * 100)}%` : "0%";
-}
-
-function cleanCell(value) {
-  return String(value ?? "").trim().replace(/^"|"$/g, "");
 }
 
 function formatDateTime(date) {

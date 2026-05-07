@@ -1391,6 +1391,39 @@ tbody tr:hover {
   line-height: 1.25;
 }
 
+.duplicate-toggle {
+  padding: 0;
+  border: 0;
+  cursor: pointer;
+  color: #7f9b82;
+  background: transparent;
+  font-size: 14px;
+  line-height: 1;
+}
+
+.time-duplicate-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  margin-top: 4px;
+  border-radius: 999px;
+}
+
+.time-duplicate-toggle:hover {
+  background: rgba(127, 155, 130, 0.08);
+}
+
+.duplicate-expanded-row td {
+  background: rgba(127, 155, 130, 0.025);
+}
+
+.duplicate-expanded-row .time-cell::before {
+  content: "↳ ";
+  color: #9aa39b;
+}
+
 .th-filter {
   padding: 0;
   border: 0;
