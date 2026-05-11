@@ -1,0 +1,9 @@
+INFO:     127.0.0.1:64895 - "GET /api/transactions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64896 - "POST /api/bills/upload HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64897 - "GET /api/transactions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64898 - "POST /api/bills/upload HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64899 - "GET /api/transactions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64900 - "POST /api/bills/upload HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64901 - "GET /api/transactions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64902 - "POST /api/bills/upload HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64903 - "GET /api/transactions HTTP/1.1" 200 OK

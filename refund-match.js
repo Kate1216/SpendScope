@@ -116,9 +116,7 @@ function applyRefundPairing(transactions) {
     });
   });
 
-  const pairedTransactions = applyFullRefundOffsetMarking(
-    transactions.map((transaction, index) => updatedByIndex.get(index) || transaction)
-  );
+  const pairedTransactions = transactions.map((transaction, index) => updatedByIndex.get(index) || transaction);
 
   console.info("[Refund Match Applied]", {
     total: transactions.length,
@@ -132,61 +130,6 @@ function applyRefundPairing(transactions) {
   });
 
   return pairedTransactions;
-}
-
-function applyFullRefundOffsetMarking(transactions) {
-  const fullRefundGroupKeys = new Set(
-    transactions
-      .filter((transaction) => transaction?.refundPairRole === "originalExpense" && transaction.refundStatus === "full" && transaction.refundGroupKey)
-      .map((transaction) => transaction.refundGroupKey)
-  );
-
-  if (!fullRefundGroupKeys.size) {
-    console.log("[Full Refund Offset Applied]", {
-      fullRefundGroups: 0,
-      originalExpensesMarked: 0,
-      refundsMarked: 0,
-    });
-    return transactions;
-  }
-
-  let originalExpensesMarked = 0;
-  let refundsMarked = 0;
-
-  const markedTransactions = transactions.map((transaction) => {
-    if (!transaction?.refundGroupKey || !fullRefundGroupKeys.has(transaction.refundGroupKey)) return transaction;
-
-    if (transaction.refundPairRole === "originalExpense") {
-      originalExpensesMarked += 1;
-      return markFullRefundOffsetTransaction(transaction, "全额退款抵消");
-    }
-
-    if (transaction.refundPairRole === "refund") {
-      refundsMarked += 1;
-      return markFullRefundOffsetTransaction(transaction, "已抵消原消费");
-    }
-
-    return transaction;
-  });
-
-  console.log("[Full Refund Offset Applied]", {
-    fullRefundGroups: fullRefundGroupKeys.size,
-    originalExpensesMarked,
-    refundsMarked,
-  });
-
-  return markedTransactions;
-}
-
-function markFullRefundOffsetTransaction(transaction, excludeReason) {
-  return {
-    ...transaction,
-    type: "排除",
-    category: "抵消",
-    excludeReason,
-    originalTypeBeforeRefundOffset: transaction.originalTypeBeforeRefundOffset || transaction.type,
-    originalCategoryBeforeRefundOffset: transaction.originalCategoryBeforeRefundOffset || transaction.category,
-  };
 }
 
 function isRefundMatchCandidate(transaction) {

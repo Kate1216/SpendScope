@@ -102,6 +102,33 @@
         <span>导出保存</span>
       </section>
 
+      <section class="panel bill-library-panel" aria-labelledby="billLibraryTitle">
+        <div class="panel-heading">
+          <div>
+            <h2 id="billLibraryTitle">月度账单库</h2>
+            <span>查看已上传的不同月份、不同平台账单</span>
+          </div>
+          <div class="bill-library-actions">
+            <button id="viewSelectedBackendBills" class="action-button" type="button">查看已选账单</button>
+            <button id="clearSelectedBackendBills" class="action-button" type="button">清空选择</button>
+            <button id="viewAllBackendBills" class="action-button" type="button">查看全部</button>
+            <button id="restoreRemovedBills" class="action-button" type="button" disabled>暂无已删除账单</button>
+          </div>
+        </div>
+        <div id="billLibraryCurrent" class="bill-library-current">当前查看：全部账单</div>
+        <div class="bill-library-header">
+          <p class="bill-library-description">上传后的账单会保存在这里。点击单个账单查看明细，也可以多选账单进行临时合并复盘。</p>
+          <p class="bill-library-tip">多选合并仅用于当前查看，不会改变原始账单归属。</p>
+        </div>
+        <div class="bill-selection-toolbar">
+          <span id="billSelectedCount" class="bill-selected-count">已选择 0 个账单</span>
+          <span class="bill-selection-note">合并查看仅影响当前页面展示，不会改动账单数据。</span>
+        </div>
+        <div id="billLibraryList" class="bill-library-list">
+          <p class="bill-library-empty">正在读取后端账单库…</p>
+        </div>
+      </section>
+
       <section class="status-bar" id="statusBar">
         <span>等待上传账单文件</span>
         <div class="status-actions">
@@ -178,51 +205,66 @@
 
       </section>
 
-      <section id="trendsPage" class="app-page">
-      <section class="panel monthly-bills-panel">
-        <div class="panel-heading">
+      <section id="trendsPage" class="app-page review-page">
+        <section class="review-hero">
           <div>
-            <h2>月度账单</h2>
-            <span>保存后的月份可用于后续趋势分析。</span>
+            <p class="eyebrow">Monthly Review</p>
+            <span class="review-hero-badge">净支出视角</span>
+            <h2>月度消费复盘</h2>
+            <p>核心金额已在本月总览中展示，这里重点复盘钱花在哪、平台来源和每日节奏。</p>
           </div>
-        </div>
-        <div class="monthly-bills-upload">
-          <input id="monthlyBillsUploader" type="file" accept=".csv,.xlsx,.xls,.pdf" multiple />
-          <button id="chooseMonthlyBillFile" class="action-button primary-action" type="button">上传账单文件</button>
-          <button id="saveToMonthlyBills" class="action-button" type="button">保存为月度账单</button>
-        </div>
-        <div id="monthlyBillsList" class="monthly-bills-list"></div>
-      </section>
-      <section class="dashboard-grid">
-        <article class="panel chart-panel">
+        </section>
+      <section class="dashboard-grid review-dashboard-grid">
+        <article class="panel chart-panel review-chart-panel">
           <div class="panel-heading">
             <h2>分类支出</h2>
             <span>钱主要花在哪</span>
           </div>
-          <canvas id="categoryChart"></canvas>
+          <div id="categoryReviewNote" class="category-review-note hidden"></div>
+          <canvas id="categoryChart" class="legacy-chart-canvas"></canvas>
+          <div id="categoryBubbleChart" class="category-bubble-chart"></div>
+          <div id="categoryChartEmpty" class="friendly-empty-state hidden">
+            <strong>还没有分类支出数据</strong>
+            <span>上传账单后，这里会显示本月主要消费类别。</span>
+          </div>
         </article>
 
-        <article class="panel chart-panel">
+        <article class="panel chart-panel review-chart-panel">
           <div class="panel-heading">
             <h2>平台支出</h2>
             <span>微信 / 支付宝 / 银行</span>
           </div>
-          <canvas id="platformChart"></canvas>
+          <canvas id="platformChart" class="legacy-chart-canvas"></canvas>
+          <div id="platformReviewList" class="platform-review-list"></div>
+          <div id="platformChartEmpty" class="friendly-empty-state hidden">
+            <strong>还没有平台支出数据</strong>
+            <span>支付宝、微信、银行账单上传后会在这里对比。</span>
+          </div>
         </article>
 
-        <article class="panel chart-panel wide">
+        <article class="panel chart-panel review-chart-panel wide">
           <div class="panel-heading">
             <h2>每日趋势</h2>
             <span>本月每天消费变化</span>
           </div>
+          <div id="dailyReviewNote" class="daily-review-note hidden"></div>
           <canvas id="dailyChart"></canvas>
+          <div id="dailyChartEmpty" class="friendly-empty-state hidden">
+            <strong>还没有每日趋势</strong>
+            <span>有支出记录后，可以看到这个月哪几天花得比较多。</span>
+          </div>
         </article>
 
-        <article class="panel ai-panel">
+        <article class="panel ai-panel assistant-panel">
           <div class="panel-heading">
             <h2>AI 消费洞察</h2>
-            <span class="insight-badge">AI Insight</span>
+            <span class="insight-badge">Monthly Note</span>
           </div>
+          <div class="assistant-actions">
+            <button id="generateInsightBtn" class="generate-insight-btn" type="button">生成 AI 小结</button>
+            <span id="insightProviderBadge" class="insight-provider-badge hidden">Local rule</span>
+          </div>
+          <div id="insightPrivacyNote" class="insight-privacy-note hidden"></div>
           <div id="aiSummary" class="summary-text">
             上传账单后，这里会生成本月总体情况、主要支出类别、值得注意的消费和下月建议。
           </div>
@@ -240,6 +282,24 @@
         <div class="table-tools">
           <input id="tableSearch" class="table-search" type="search" placeholder="搜索账单来源、收/付款方式、交易对方、商品说明、交易类型、类别或金额" />
           <button id="manageCategories" class="action-button" type="button">管理分类</button>
+          <button id="editSimilarTransactions" class="action-button" type="button">修改同类账单</button>
+          <div class="similar-edit-panel">
+            <span class="similar-edit-title">修改同类账单</span>
+            <span class="similar-edit-note">会根据当前样本流水匹配同类交易。</span>
+            <span id="similarEditHint" class="similar-edit-hint">请先选中一条流水作为样本。</span>
+          </div>
+          <button id="startManualMerge" class="action-button" type="button">合并账单</button>
+          <button id="confirmManualMerge" class="action-button" type="button">拆分账单</button>
+          <span id="cancelManualMerge" class="selection-count">已选 0 条</span>
+        </div>
+        <div class="details-page-intro">
+          <strong>账单明细</strong>
+          <span>这里展示当前账单视图中的所有流水。你可以搜索、筛选，也可以修改单条分类或批量修改同类账单。</span>
+          <em>已匹配退款会折叠在原付款项下方，真实支出按退款抵扣后的净额统计。</em>
+        </div>
+        <div class="details-helper-row">
+          <button id="clearTableFilters" class="action-button table-clear-button" type="button" disabled>清空搜索和筛选</button>
+          <span id="tableResultStatus" class="table-result-status">当前未选择账单。请选择一个月度账单查看明细和复盘。</span>
         </div>
         <div class="table-wrap">
           <table>
@@ -344,6 +404,170 @@
           <button id="cancelCategoryModal" class="action-button" type="button">关闭</button>
         </div>
       </div>
+    </div>
+    <div id="similarTransactionModal" class="modal-backdrop hidden">
+      <div class="modal similar-transaction-modal">
+        <div class="modal-heading">
+          <h2>修改同类账单</h2>
+          <button id="closeSimilarTransactionModal" class="icon-button" type="button">×</button>
+        </div>
+        <p class="similar-transaction-intro">SpendScope 会根据当前样本流水，查找当前已有的同类交易，并批量应用你的修改。</p>
+        <div class="similar-transaction-sample">
+          <p>你正在基于这条明细修改同类账单：</p>
+          <dl>
+            <div>
+              <dt>交易对象</dt>
+              <dd id="similarSampleMerchant">-</dd>
+            </div>
+            <div>
+              <dt>交易说明</dt>
+              <dd id="similarSampleDescription">-</dd>
+            </div>
+            <div>
+              <dt>当前金额</dt>
+              <dd id="similarSampleAmount">-</dd>
+            </div>
+            <div>
+              <dt>当前类别</dt>
+              <dd id="similarSampleCategory">-</dd>
+            </div>
+            <div>
+              <dt>当前收支类型</dt>
+              <dd id="similarSampleType">-</dd>
+            </div>
+          </dl>
+        </div>
+        <label class="modal-field">
+          <span>类别</span>
+          <select id="similarTargetCategory"></select>
+        </label>
+        <label class="modal-field">
+          <span>收支类型</span>
+          <select id="similarTargetType"></select>
+        </label>
+        <label class="similar-remember-choice">
+          <input id="similarRememberChoice" type="checkbox" />
+          <span>
+            <strong>记住我的选择</strong>
+            <em id="similarRememberDescription">仅修改当前已有的同类交易，不会生成后续分类规则。</em>
+          </span>
+        </label>
+        <p class="similar-protection-note">排除、转账、退款等特殊流水会继续受到规则保护，不会被普通消费分类规则随意覆盖。</p>
+        <p id="similarConfirmNote" class="similar-confirm-note">确认修改当前已有同类交易？这不会生成后续分类规则。</p>
+        <p id="similarTransactionMessage" class="modal-message"></p>
+        <div class="modal-actions">
+          <button id="confirmSimilarTransactionEdit" class="action-button primary-action" type="button">确定</button>
+          <button id="cancelSimilarTransactionModal" class="action-button" type="button">取消</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="mergeModal" class="modal-backdrop hidden">
+      <div class="modal merge-modal">
+        <div class="modal-heading">
+          <h2>合并账单</h2>
+          <button id="closeMergeModal" class="icon-button" type="button">×</button>
+        </div>
+        <div id="mergePreview" class="merge-preview"></div>
+        <label class="modal-field">
+          <span>时间</span>
+          <input id="mergeTime" type="text" />
+        </label>
+        <label class="modal-field">
+          <span>账单来源</span>
+          <input id="mergeSourcePlatform" type="text" />
+        </label>
+        <label class="modal-field">
+          <span>收/付款方式</span>
+          <input id="mergePlatform" type="text" />
+        </label>
+        <label class="modal-field">
+          <span>交易对方</span>
+          <span class="merge-combo-field">
+            <input id="mergeMerchant" type="text" list="mergeMerchantOptions" />
+            <span class="merge-combo-arrow">▾</span>
+          </span>
+          <datalist id="mergeMerchantOptions"></datalist>
+          <small class="merge-field-hint">可选择被合并明细中的交易对方，也可手动输入</small>
+        </label>
+        <label class="modal-field">
+          <span>交易说明</span>
+          <span class="merge-combo-field">
+            <input id="mergeDescription" type="text" list="mergeDescriptionOptions" />
+            <span class="merge-combo-arrow">▾</span>
+          </span>
+          <datalist id="mergeDescriptionOptions"></datalist>
+        </label>
+        <label class="modal-field">
+          <span>类别</span>
+          <span class="merge-combo-field">
+            <select id="mergeCategory"></select>
+            <span class="merge-combo-arrow">▾</span>
+          </span>
+        </label>
+        <label class="modal-field">
+          <span>收支类型</span>
+          <span class="merge-combo-field">
+            <select id="mergeType">
+              <option value="待确认">待确认</option>
+              <option value="支出">支出</option>
+              <option value="收入">收入</option>
+              <option value="退款">退款</option>
+              <option value="排除">排除</option>
+            </select>
+            <span class="merge-combo-arrow">▾</span>
+          </span>
+        </label>
+        <label class="modal-field">
+          <span>金额</span>
+          <div id="mergeAmountBreakdown" class="merge-amount-breakdown"></div>
+          <input id="mergeAmount" type="number" min="0" step="0.01" />
+        </label>
+        <label class="modal-field">
+          <span>备注</span>
+          <input id="mergeMemo" type="text" placeholder="可选" />
+        </label>
+        <p id="mergeMessage" class="modal-message"></p>
+        <div class="modal-actions">
+          <button id="createManualMerge" class="action-button primary-action" type="button">确认生成</button>
+          <button id="cancelMergeModal" class="action-button" type="button">取消</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="appModal" class="app-modal-backdrop hidden" role="presentation">
+      <section class="app-modal app-modal-default" role="dialog" aria-modal="true" aria-labelledby="appModalTitle" aria-describedby="appModalMessage">
+        <div class="app-modal-tone" aria-hidden="true"></div>
+        <div class="app-modal-content">
+          <div class="app-modal-heading">
+            <p id="appModalToneLabel" class="app-modal-tone-label">提示</p>
+            <h2 id="appModalTitle">提示</h2>
+          </div>
+          <p id="appModalMessage" class="app-modal-message"></p>
+          <p id="appModalDetail" class="app-modal-detail hidden"></p>
+          <div class="app-modal-actions">
+            <button id="appModalCancel" class="action-button app-modal-cancel" type="button">取消</button>
+            <button id="appModalConfirm" class="action-button primary-action app-modal-confirm" type="button">确定</button>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <div id="removedBillsModal" class="removed-bills-backdrop hidden" role="presentation">
+      <section class="removed-bills-modal" role="dialog" aria-modal="true" aria-labelledby="removedBillsTitle" aria-describedby="removedBillsDescription">
+        <div class="modal-heading">
+          <div>
+            <h2 id="removedBillsTitle">已删除账单</h2>
+            <p id="removedBillsDescription" class="removed-bills-description">这些账单只是从账单库和普通视图中移除，数据库中的流水、修改记录、退款信息和分类规则仍然保留。</p>
+          </div>
+          <button id="closeRemovedBillsModal" class="icon-button" type="button">×</button>
+        </div>
+        <div id="removedBillsList" class="removed-bills-list"></div>
+        <div class="removed-bills-actions">
+          <button id="closeRemovedBillsModalFooter" class="action-button" type="button">关闭</button>
+          <button id="restoreAllRemovedBills" class="action-button primary-action restore-all-bills-btn" type="button">恢复全部</button>
+        </div>
+      </section>
     </div>
 
     <div id="loadingOverlay" class="loading-overlay hidden" aria-live="polite" aria-busy="true">
